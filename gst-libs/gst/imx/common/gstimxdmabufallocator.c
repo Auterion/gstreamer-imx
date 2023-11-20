@@ -24,10 +24,12 @@
  */
 #include "config.h"
 
+#include <stdio.h>
 #include <assert.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <fcntl.h>
 #include <gst/gst.h>
 #include <gst/allocators/allocators.h>
@@ -481,8 +483,52 @@ static void gst_imx_dmabuf_allocator_mem_unmap_full(GstMemory *memory, G_GNUC_UN
 	unlock_imx_dmabuf_memory_mutex(memory);
 }
 
+static uint8_t* wrapped_dma_buffer_map(ImxWrappedDmaBuffer *wrapped_dma_buffer, unsigned int flags, int *error)
+{
+	assert(wrapped_dma_buffer != NULL);
+	assert(wrapped_dma_buffer->virtual_address == NULL);
+
+	if ((flags & IMX_DMA_BUFFER_MAPPING_READWRITE_FLAG_MASK) == 0)
+		flags |= IMX_DMA_BUFFER_MAPPING_FLAG_READ | IMX_DMA_BUFFER_MAPPING_FLAG_WRITE;
+
+	int mmap_prot = 0;
+	int mmap_flags = MAP_SHARED;
+
+	mmap_prot |= (flags & IMX_DMA_BUFFER_MAPPING_FLAG_READ) ? PROT_READ : 0;
+	mmap_prot |= (flags & IMX_DMA_BUFFER_MAPPING_FLAG_WRITE) ? PROT_WRITE : 0;
+
+	wrapped_dma_buffer->virtual_address = mmap(0, wrapped_dma_buffer->size, mmap_prot, mmap_flags, wrapped_dma_buffer->fd, 0);
+
+	if (wrapped_dma_buffer->virtual_address == MAP_FAILED && error != NULL) {
+		*error = errno;
+	}
+
+	return wrapped_dma_buffer->virtual_address;
+}
+
+static void wrapped_dma_buffer_unmap(ImxWrappedDmaBuffer *wrapped_dma_buffer)
+{
+	assert(wrapped_dma_buffer != NULL);
+	assert(wrapped_dma_buffer->virtual_address != NULL);
+
+	munmap(wrapped_dma_buffer->virtual_address, wrapped_dma_buffer->size);
+}
 
 
+static void wrapped_dma_buffer_deallocate(ImxWrappedDmaBuffer *wrapped_dma_buffer)
+{
+	assert(wrapped_dma_buffer != NULL);
+	assert(wrapped_dma_buffer->fd > 0);
+	assert(wrapped_dma_buffer->virtual_address == NULL);
+	close(wrapped_dma_buffer->fd);
+}
+
+static void wrapped_dma_buffer_free(void* ptr)
+{
+	ImxWrappedDmaBuffer *wrapped_dma_buffer = (ImxWrappedDmaBuffer* )ptr;
+	imx_dma_buffer_deallocate(wrapped_dma_buffer);
+	g_free(wrapped_dma_buffer);
+}
 
 /**** Public functions ****/
 
@@ -543,9 +589,14 @@ GstMemory* gst_imx_dmabuf_allocator_wrap_dmabuf(GstAllocator *allocator, int dma
 
 	wrapped_dma_buffer = g_malloc(sizeof(ImxWrappedDmaBuffer));
 	imx_dma_buffer_init_wrapped_buffer(wrapped_dma_buffer);
+	wrapped_dma_buffer->map = wrapped_dma_buffer_map;
+	wrapped_dma_buffer->unmap = wrapped_dma_buffer_unmap;
+	wrapped_dma_buffer->deallocate = wrapped_dma_buffer_deallocate;
 	wrapped_dma_buffer->fd = dmabuf_fd;
 	wrapped_dma_buffer->size = dmabuf_size;
 	wrapped_dma_buffer->physical_address = physical_address;
+	wrapped_dma_buffer->ref_count = 0;
+	wrapped_dma_buffer->virtual_address = NULL;
 
 	/* Use GST_FD_MEMORY_FLAG_DONT_CLOSE since
 	 * libimxdmabuffer takes care of closing the FD. */
@@ -560,7 +611,7 @@ GstMemory* gst_imx_dmabuf_allocator_wrap_dmabuf(GstAllocator *allocator, int dma
 		GST_MINI_OBJECT_CAST(memory),
 		gst_imx_dmabuf_memory_internal_imxdmabuffer_quark,
 		(gpointer)wrapped_dma_buffer,
-		g_free
+		wrapped_dma_buffer_free
 	);
 
 	add_imx_dmabuf_memory_mutex(memory);
