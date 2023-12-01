@@ -527,6 +527,7 @@ static void wrapped_dma_buffer_free(void* ptr)
 {
 	ImxWrappedDmaBuffer *wrapped_dma_buffer = (ImxWrappedDmaBuffer* )ptr;
 	imx_dma_buffer_deallocate(wrapped_dma_buffer);
+	gst_memory_unref((GstMemory* )wrapped_dma_buffer->user_data);
 	g_free(wrapped_dma_buffer);
 }
 
@@ -562,7 +563,7 @@ finish:
 }
 
 
-GstMemory* gst_imx_dmabuf_allocator_wrap_dmabuf(GstAllocator *allocator, int dmabuf_fd, gsize dmabuf_size)
+GstMemory* gst_imx_dmabuf_allocator_wrap_dmabuf(GstAllocator *allocator, GstMemory *input_memory, int dmabuf_fd, gsize dmabuf_size)
 {
 	GstImxDmaBufAllocator *self = GST_IMX_DMABUF_ALLOCATOR(allocator);
 	GstImxDmaBufAllocatorClass *klass = GST_IMX_DMABUF_ALLOCATOR_CLASS(G_OBJECT_GET_CLASS(self));
@@ -597,6 +598,7 @@ GstMemory* gst_imx_dmabuf_allocator_wrap_dmabuf(GstAllocator *allocator, int dma
 	wrapped_dma_buffer->physical_address = physical_address;
 	wrapped_dma_buffer->ref_count = 0;
 	wrapped_dma_buffer->virtual_address = NULL;
+	wrapped_dma_buffer->user_data = (void* )input_memory;
 
 	/* Use GST_FD_MEMORY_FLAG_DONT_CLOSE since
 	 * libimxdmabuffer takes care of closing the FD. */
@@ -606,6 +608,8 @@ GstMemory* gst_imx_dmabuf_allocator_wrap_dmabuf(GstAllocator *allocator, int dma
 		GST_ERROR_OBJECT(self, "could not allocate GstMemory with GstDmaBufAllocator");
 		goto error;
 	}
+
+	gst_memory_ref(input_memory);
 
 	gst_mini_object_set_qdata(
 		GST_MINI_OBJECT_CAST(memory),

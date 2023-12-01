@@ -95,7 +95,7 @@ guintptr gst_imx_dmabuf_allocator_get_physical_address(GstImxDmaBufAllocator *al
  * Returns: GstMemory containing an ImxDmaBuffer which in turn wraps the
  *          @dmabuf_fd duplicate created internally by this function.
  */
-GstMemory* gst_imx_dmabuf_allocator_wrap_dmabuf(GstAllocator *allocator, int dmabuf_fd, gsize dmabuf_size);
+GstMemory* gst_imx_dmabuf_allocator_wrap_dmabuf(GstAllocator *allocator, GstMemory *input_memory, int dmabuf_fd, gsize dmabuf_size);
 
 /**
  * gst_imx_dmabuf_allocator_is_active:

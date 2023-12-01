@@ -261,7 +261,7 @@ static GstFlowReturn dmabuf_upload_method_perform(GstImxDmaBufferUploadMethodCon
 		input_memory->offset
 	);
 
-	*output_memory = gst_imx_dmabuf_allocator_wrap_dmabuf(self->parent.uploader->imx_dma_buffer_allocator, dup_dmabuf_fd, size);
+	*output_memory = gst_imx_dmabuf_allocator_wrap_dmabuf(self->parent.uploader->imx_dma_buffer_allocator, input_memory, dup_dmabuf_fd, size);
 	(*output_memory)->maxsize = input_memory->maxsize;
 	(*output_memory)->align = input_memory->align;
 	(*output_memory)->offset = input_memory->offset;
