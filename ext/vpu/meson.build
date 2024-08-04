@@ -20,6 +20,7 @@ source = [
 	'gstimxvpuenc.c',
 	'gstimxvpuench263.c',
 	'gstimxvpuench264.c',
+	'gstimxvpuench265.c',
 	'gstimxvpuencjpeg.c',
 	'gstimxvpuencmpeg4.c',
 	'gstimxvpuencvp8.c',

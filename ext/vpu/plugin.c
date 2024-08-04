@@ -22,6 +22,7 @@
 #include "gstimxvpudec.h"
 #include "gstimxvpuench263.h"
 #include "gstimxvpuench264.h"
+#include "gstimxvpuench265.h"
 #include "gstimxvpuencjpeg.h"
 #include "gstimxvpuencmpeg4.h"
 #include "gstimxvpuencvp8.h"
@@ -61,6 +62,10 @@ static gboolean plugin_init(GstPlugin *plugin)
 
 				case IMX_VPU_API_COMPRESSION_FORMAT_H264:
 					ret = gst_element_register(plugin, "imxvpuenc_h264", GST_RANK_PRIMARY + 1, gst_imx_vpu_enc_h264_get_type());
+					break;
+
+				case IMX_VPU_API_COMPRESSION_FORMAT_H265:
+					ret = gst_element_register(plugin, "imxvpuenc_h265", GST_RANK_PRIMARY + 1, gst_imx_vpu_enc_h265_get_type());
 					break;
 
 				case IMX_VPU_API_COMPRESSION_FORMAT_JPEG:

@@ -66,7 +66,10 @@ enum
 	PROP_INTRA_REFRESH,
 	PROP_FIXED_INTRA_QUANTIZATION,
 	PROP_ALLOW_FRAMESKIPPING,
-	PROP_USE_INTRA_REFRESH
+	PROP_USE_INTRA_REFRESH,
+	PROP_INTRA_QP_BIAS,
+	PROP_HRD_BUFFER_SIZE,
+	PROP_USE_HRD
 };
 
 
@@ -77,8 +80,9 @@ enum
 #define DEFAULT_FIXED_INTRA_QUANTIZATION 0
 #define DEFAULT_ALLOW_FRAMESKIPPING      FALSE
 #define DEFAULT_USE_INTRA_REFRESH        FALSE
-
-
+#define DEFAULT_INTRA_QP_BIAS			 0
+#define DEFAULT_HRD_BUFFER_SIZE			 1000
+#define DEFAULT_USE_HRD					 FALSE
 
 
 G_DEFINE_ABSTRACT_TYPE(GstImxVpuEnc, gst_imx_vpu_enc, GST_TYPE_VIDEO_ENCODER)
@@ -135,6 +139,9 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->fixed_intra_quantization = DEFAULT_FIXED_INTRA_QUANTIZATION;
 	imx_vpu_enc->allow_frameskipping = DEFAULT_ALLOW_FRAMESKIPPING;
 	imx_vpu_enc->use_intra_refresh = DEFAULT_USE_INTRA_REFRESH;
+	imx_vpu_enc->intra_qp_bias = DEFAULT_INTRA_QP_BIAS;
+	imx_vpu_enc->hrd_buffer_size = DEFAULT_HRD_BUFFER_SIZE;
+	imx_vpu_enc->use_hrd = DEFAULT_USE_HRD;
 
 	imx_vpu_enc->stream_buffer = NULL;
 	imx_vpu_enc->encoder = NULL;
@@ -223,6 +230,24 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
+		case PROP_INTRA_QP_BIAS:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->intra_qp_bias = g_value_get_int(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_HRD_BUFFER_SIZE:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->hrd_buffer_size = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_USE_HRD:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->use_hrd = g_value_get_boolean(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
 		default:
 			if (klass->set_encoder_property != NULL)
 				klass->set_encoder_property(object, prop_id, value, pspec);
@@ -285,6 +310,24 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 		case PROP_USE_INTRA_REFRESH:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			g_value_set_boolean(value, imx_vpu_enc->use_intra_refresh);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_INTRA_QP_BIAS:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_int(value, imx_vpu_enc->intra_qp_bias);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_HRD_BUFFER_SIZE:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->hrd_buffer_size);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_USE_HRD:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_boolean(value, imx_vpu_enc->use_hrd);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -473,6 +516,9 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	open_params->fixed_intra_quantization = imx_vpu_enc->fixed_intra_quantization;
 	open_params->flags = (imx_vpu_enc->allow_frameskipping ? IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_ALLOW_FRAMESKIPPING : 0)
 	                   | (imx_vpu_enc->use_intra_refresh ? IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_USE_INTRA_REFRESH : 0);
+	open_params->flags |= imx_vpu_enc->use_hrd ? IMX_VPU_API_ENC_H26x_OPEN_PARAMS_FLAG_USE_HRD : 0;
+	open_params->intra_qp_delta = imx_vpu_enc->intra_qp_bias;
+	imx_vpu_enc->hrd_buffer_size = DEFAULT_HRD_BUFFER_SIZE;
 	GST_OBJECT_UNLOCK(imx_vpu_enc);
 
 	GST_DEBUG_OBJECT(encoder, "setting bitrate to %u kbps and GOP size to %u", open_params->bitrate, open_params->gop_size);
@@ -856,34 +902,39 @@ static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_
 			{
 				guint32 system_frame_number;
 				GstMapInfo map_info;
-				GstBuffer *output_buffer;
+				GstBuffer *output_buffer = NULL;
 				ImxVpuApiEncodedFrame encoded_frame;
 				GstVideoCodecFrame *out_frame;
-				int is_sync_point;
+				int is_sync_point = 0;
 
-				if ((output_buffer = gst_video_encoder_allocate_output_buffer(encoder, encoded_frame_size)) == NULL)
-				{
-					GST_ERROR_OBJECT(imx_vpu_enc, "could not allocate output buffer for encoded frame");
-					flow_ret = GST_FLOW_ERROR;
-					goto finish;
-				}
+				if (encoded_frame_size > 0) {
+					if ((output_buffer = gst_video_encoder_allocate_output_buffer(encoder, encoded_frame_size)) == NULL)
+					{
+						GST_ERROR_OBJECT(imx_vpu_enc, "could not allocate output buffer for encoded frame");
+						flow_ret = GST_FLOW_ERROR;
+						goto finish;
+					}
 
-				gst_buffer_map(output_buffer, &map_info, GST_MAP_WRITE);
+					gst_buffer_map(output_buffer, &map_info, GST_MAP_WRITE);
 
-				g_assert(map_info.size >= encoded_frame_size);
-				memset(&encoded_frame, 0, sizeof(encoded_frame));
-				encoded_frame.data = map_info.data;
-				encoded_frame.data_size = encoded_frame_size;
+					g_assert(map_info.size >= encoded_frame_size);
+					memset(&encoded_frame, 0, sizeof(encoded_frame));
+					encoded_frame.data = map_info.data;
+					encoded_frame.data_size = encoded_frame_size;
 
-				enc_ret = imx_vpu_api_enc_get_encoded_frame_ext(imx_vpu_enc->encoder, &encoded_frame, &is_sync_point);
+					enc_ret = imx_vpu_api_enc_get_encoded_frame_ext(imx_vpu_enc->encoder, &encoded_frame, &is_sync_point);
 
-				gst_buffer_unmap(output_buffer, &map_info);
+					gst_buffer_unmap(output_buffer, &map_info);
 
-				if (enc_ret != IMX_VPU_API_ENC_RETURN_CODE_OK)
-				{
-					GST_ERROR_OBJECT(imx_vpu_enc, "could not retrieve encoded frame: %s", imx_vpu_api_enc_return_code_string(enc_ret));
-					flow_ret = GST_FLOW_ERROR;
-					goto finish;
+					if (enc_ret != IMX_VPU_API_ENC_RETURN_CODE_OK)
+					{
+						GST_ERROR_OBJECT(imx_vpu_enc, "could not retrieve encoded frame: %s", imx_vpu_api_enc_return_code_string(enc_ret));
+						flow_ret = GST_FLOW_ERROR;
+						goto finish;
+					}
+				} else {
+					flow_ret = GST_FLOW_OK;
+					do_loop = FALSE;
 				}
 
 				system_frame_number = (guint32)((guintptr)(encoded_frame.context));
@@ -891,7 +942,8 @@ static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_
 				if (G_UNLIKELY(out_frame == NULL))
 				{
 					GST_WARNING_OBJECT(imx_vpu_enc, "no gstframe exists with number #%" G_GUINT32_FORMAT " - discarding encoded frame", system_frame_number);
-					gst_buffer_unref(output_buffer);
+					if (output_buffer)
+						gst_buffer_unref(output_buffer);
 					goto finish;
 				}
 				out_frame->output_buffer = output_buffer;
@@ -906,6 +958,7 @@ static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_
 				break;
 			}
 
+#if 0
 			case IMX_VPU_API_ENC_OUTPUT_CODE_FRAME_SKIPPED:
 			{
 				guint32 system_frame_number;
@@ -936,6 +989,7 @@ static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_
 
 				break;
 			}
+#endif
 
 			case IMX_VPU_API_ENC_OUTPUT_CODE_MORE_INPUT_DATA_NEEDED:
 				GST_LOG_OBJECT(imx_vpu_enc, "VPU has no more data to encode");
@@ -1106,6 +1160,42 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 			"Allow frameskipping",
 			"Allow rate control to skip frames if necessary to maintain bitrate; not used if bitrate is set to 0",
 			DEFAULT_ALLOW_FRAMESKIPPING,
+			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+		)
+	);
+
+	g_object_class_install_property(
+		object_class,
+		PROP_INTRA_QP_BIAS,
+		g_param_spec_int(
+			"intra-qp-bias",
+			"Intra QP bias",
+			"Bias for quantization factor to use for intra frames; this can be used to change the relative quality of the Intra pictures or to lower the size of Intra pictures",
+			-12, 12, DEFAULT_INTRA_QP_BIAS,
+			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+		)
+	);
+
+	g_object_class_install_property(
+		object_class,
+		PROP_HRD_BUFFER_SIZE,
+		g_param_spec_uint(
+			"hrd-buffer-size",
+			"HRD CBP buffer size",
+			"Size of Coded Picture Buffer in HRD (kbits)",
+			0, G_MAXUINT, DEFAULT_HRD_BUFFER_SIZE,
+			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+		)
+	);
+
+	g_object_class_install_property(
+		object_class,
+		PROP_USE_HRD,
+		g_param_spec_boolean(
+			"use-hrd",
+			"Use HRD",
+			"Hypothetical Reference Decoder model, restricts the instantaneous bitrate and total bit amount of every coded picture; enabling HRD will cause tight constrains on the operation of the rate control",
+			DEFAULT_USE_HRD,
 			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
 		)
 	);

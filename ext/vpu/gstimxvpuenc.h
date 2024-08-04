@@ -113,6 +113,9 @@ struct _GstImxVpuEnc
 	guint fixed_intra_quantization;
 	gboolean allow_frameskipping;
 	gboolean use_intra_refresh;
+	gint intra_qp_bias;
+	guint hrd_buffer_size;
+	gboolean use_hrd;
 };
 
 
