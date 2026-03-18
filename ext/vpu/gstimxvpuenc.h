@@ -116,6 +116,23 @@ struct _GstImxVpuEnc
 	gint intra_qp_bias;
 	guint hrd_buffer_size;
 	gboolean use_hrd;
+
+	/* Cached VPS/SPS/PPS parameter sets for periodic re-insertion.
+	 * Captured from the first encoded frame's header data. */
+	guint8 *cached_headers;
+	gsize cached_headers_size;
+
+	/* Monotonically increasing count of encoded output frames.
+	 * Used to detect config-interval boundaries. */
+	guint64 output_frame_count;
+
+	/* Header insertion interval set by subclass (H.265):
+	 *   -1 = every gop-size frames (default)
+	 *    0 = disabled
+	 *   >0 = every N seconds (converted to frames using fps)
+	 * Precomputed as config_interval_frames during set_format. */
+	gint config_interval;
+	guint config_interval_frames;
 };
 
 

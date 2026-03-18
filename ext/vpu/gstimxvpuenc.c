@@ -154,6 +154,12 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->uploaded_buffers_table = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, (GDestroyNotify)gst_buffer_unref);
 	imx_vpu_enc->fb_pool_buffers = NULL;
 
+	imx_vpu_enc->cached_headers = NULL;
+	imx_vpu_enc->cached_headers_size = 0;
+	imx_vpu_enc->output_frame_count = 0;
+	imx_vpu_enc->config_interval = 0;
+	imx_vpu_enc->config_interval_frames = 0;
+
 	imx_vpu_enc->fatal_error_cannot_encode = FALSE;
 }
 
@@ -440,6 +446,11 @@ static gboolean gst_imx_vpu_enc_stop(GstVideoEncoder *encoder)
 		imx_vpu_enc->default_dma_buf_allocator = NULL;
 	}
 
+	g_free(imx_vpu_enc->cached_headers);
+	imx_vpu_enc->cached_headers = NULL;
+	imx_vpu_enc->cached_headers_size = 0;
+	imx_vpu_enc->output_frame_count = 0;
+
 	GST_INFO_OBJECT(imx_vpu_enc, "i.MX VPU %s encoder stopped", codec_details->desc_name);
 
 	return TRUE;
@@ -481,6 +492,11 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 		gst_object_unref(imx_vpu_enc->dma_buffer_pool);
 		imx_vpu_enc->dma_buffer_pool = NULL;
 	}
+
+	g_free(imx_vpu_enc->cached_headers);
+	imx_vpu_enc->cached_headers = NULL;
+	imx_vpu_enc->cached_headers_size = 0;
+	imx_vpu_enc->output_frame_count = 0;
 
 
 	/* Begin filling the open_params. */
@@ -767,6 +783,8 @@ static gboolean gst_imx_vpu_enc_flush(GstVideoEncoder *encoder)
 	if (imx_vpu_enc->encoder != NULL)
 		imx_vpu_api_enc_flush(imx_vpu_enc->encoder);
 
+	imx_vpu_enc->output_frame_count = 0;
+
 	return TRUE;
 }
 
@@ -936,6 +954,32 @@ static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_
 					flow_ret = GST_FLOW_OK;
 					do_loop = FALSE;
 				}
+
+				if (encoded_frame.has_header && encoded_frame.header_size > 0 && imx_vpu_enc->cached_headers == NULL)
+				{
+					if (gst_buffer_map(output_buffer, &map_info, GST_MAP_READ))
+					{
+						imx_vpu_enc->cached_headers = g_malloc(encoded_frame.header_size);
+						memcpy(imx_vpu_enc->cached_headers, map_info.data, encoded_frame.header_size);
+						imx_vpu_enc->cached_headers_size = encoded_frame.header_size;
+						gst_buffer_unmap(output_buffer, &map_info);
+						GST_INFO_OBJECT(imx_vpu_enc, "cached %" G_GSIZE_FORMAT " bytes of parameter set headers", imx_vpu_enc->cached_headers_size);
+					}
+				}
+
+				if (imx_vpu_enc->config_interval_frames > 0
+				    && imx_vpu_enc->cached_headers != NULL
+				    && !encoded_frame.has_header
+				    && imx_vpu_enc->output_frame_count > 0
+				    && (imx_vpu_enc->output_frame_count % imx_vpu_enc->config_interval_frames) == 0)
+				{
+					GstBuffer *header_buf = gst_buffer_new_wrapped(g_memdup2(imx_vpu_enc->cached_headers, imx_vpu_enc->cached_headers_size), imx_vpu_enc->cached_headers_size);
+					output_buffer = gst_buffer_append(header_buf, output_buffer);
+					GST_LOG_OBJECT(imx_vpu_enc, "prepended %" G_GSIZE_FORMAT " bytes of parameter sets at frame %" G_GUINT64_FORMAT,
+						imx_vpu_enc->cached_headers_size, imx_vpu_enc->output_frame_count);
+				}
+
+				imx_vpu_enc->output_frame_count++;
 
 				system_frame_number = (guint32)((guintptr)(encoded_frame.context));
 				out_frame = gst_video_encoder_get_frame(encoder, system_frame_number);
