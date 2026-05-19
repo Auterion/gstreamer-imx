@@ -1002,38 +1002,37 @@ static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_
 				break;
 			}
 
-#if 0
 			case IMX_VPU_API_ENC_OUTPUT_CODE_FRAME_SKIPPED:
 			{
 				guint32 system_frame_number;
-				void *skipped_frame_context;
-				uint64_t skipped_frame_pts, skipped_frame_dts;
+				void *skipped_frame_context = NULL;
+				uint64_t skipped_frame_pts = 0, skipped_frame_dts = 0;
 				GstVideoCodecFrame *out_frame;
 
 				enc_ret = imx_vpu_api_enc_get_skipped_frame_info(imx_vpu_enc->encoder, &skipped_frame_context, &skipped_frame_pts, &skipped_frame_dts);
-				g_assert(enc_ret == IMX_VPU_API_ENC_RETURN_CODE_OK);
+				if (enc_ret != IMX_VPU_API_ENC_RETURN_CODE_OK)
+				{
+					GST_WARNING_OBJECT(imx_vpu_enc, "skipped-frame output without info available; ignoring");
+					break;
+				}
 
 				system_frame_number = (guint32)((guintptr)skipped_frame_context);
 				out_frame = gst_video_encoder_get_frame(encoder, system_frame_number);
 				if (G_UNLIKELY(out_frame == NULL))
 				{
 					GST_WARNING_OBJECT(imx_vpu_enc, "no gstframe exists with number #%" G_GUINT32_FORMAT " - ignoring skipped frame", system_frame_number);
-					goto finish;
+					break;
 				}
 
-				GST_DEBUG_OBJECT(imx_vpu_enc, "encoder skipped gstframe with number #%" G_GUINT32_FORMAT, system_frame_number);
+				GST_INFO_OBJECT(imx_vpu_enc, "encoder skipped gstframe #%" G_GUINT32_FORMAT " (HW auto-recovery)", system_frame_number);
 
-				/* Let gst_video_encoder_finish_frame() know that this frame was skipped/dropped
-				 * by ensuring that the out_frame->output_buffer field is set to NULL. */
 				out_frame->output_buffer = NULL;
-
 				flow_ret = gst_video_encoder_finish_frame(encoder, out_frame);
 
 				g_hash_table_remove(imx_vpu_enc->uploaded_buffers_table, (gpointer)(gintptr)system_frame_number);
 
 				break;
 			}
-#endif
 
 			case IMX_VPU_API_ENC_OUTPUT_CODE_MORE_INPUT_DATA_NEEDED:
 				GST_LOG_OBJECT(imx_vpu_enc, "VPU has no more data to encode");
