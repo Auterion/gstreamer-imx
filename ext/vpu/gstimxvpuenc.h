@@ -118,6 +118,9 @@ struct _GstImxVpuEnc
 	gint intra_qp_bias;
 	guint hrd_buffer_size;
 	gboolean use_hrd;
+	guint qp_min;
+	guint qp_min_intra;
+	guint static_scene_ibit_percent;
 
 	/* Cached VPS/SPS/PPS parameter sets for periodic re-insertion.
 	 * Captured from the first encoded frame's header data. */

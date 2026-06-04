@@ -69,7 +69,10 @@ enum
 	PROP_USE_INTRA_REFRESH,
 	PROP_INTRA_QP_BIAS,
 	PROP_HRD_BUFFER_SIZE,
-	PROP_USE_HRD
+	PROP_USE_HRD,
+	PROP_QP_MIN,
+	PROP_QP_MIN_INTRA,
+	PROP_STATIC_SCENE_IBIT_PERCENT
 };
 
 
@@ -83,6 +86,9 @@ enum
 #define DEFAULT_INTRA_QP_BIAS			 0
 #define DEFAULT_HRD_BUFFER_SIZE			 1000
 #define DEFAULT_USE_HRD					 FALSE
+#define DEFAULT_QP_MIN                  0
+#define DEFAULT_QP_MIN_INTRA            0
+#define DEFAULT_STATIC_SCENE_IBIT_PERCENT 0
 
 
 G_DEFINE_ABSTRACT_TYPE(GstImxVpuEnc, gst_imx_vpu_enc, GST_TYPE_VIDEO_ENCODER)
@@ -156,6 +162,9 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->intra_qp_bias = DEFAULT_INTRA_QP_BIAS;
 	imx_vpu_enc->hrd_buffer_size = DEFAULT_HRD_BUFFER_SIZE;
 	imx_vpu_enc->use_hrd = DEFAULT_USE_HRD;
+	imx_vpu_enc->qp_min = DEFAULT_QP_MIN;
+	imx_vpu_enc->qp_min_intra = DEFAULT_QP_MIN_INTRA;
+	imx_vpu_enc->static_scene_ibit_percent = DEFAULT_STATIC_SCENE_IBIT_PERCENT;
 
 	imx_vpu_enc->stream_buffer = NULL;
 	imx_vpu_enc->encoder = NULL;
@@ -301,6 +310,24 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
+		case PROP_QP_MIN:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->qp_min = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_QP_MIN_INTRA:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->qp_min_intra = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_STATIC_SCENE_IBIT_PERCENT:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->static_scene_ibit_percent = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
 		default:
 			if (klass->set_encoder_property != NULL)
 				klass->set_encoder_property(object, prop_id, value, pspec);
@@ -381,6 +408,24 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 		case PROP_USE_HRD:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			g_value_set_boolean(value, imx_vpu_enc->use_hrd);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_QP_MIN:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->qp_min);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_QP_MIN_INTRA:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->qp_min_intra);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_STATIC_SCENE_IBIT_PERCENT:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->static_scene_ibit_percent);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -581,7 +626,10 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	                   | (imx_vpu_enc->use_intra_refresh ? IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_USE_INTRA_REFRESH : 0);
 	open_params->flags |= imx_vpu_enc->use_hrd ? IMX_VPU_API_ENC_H26x_OPEN_PARAMS_FLAG_USE_HRD : 0;
 	open_params->intra_qp_delta = imx_vpu_enc->intra_qp_bias;
-	imx_vpu_enc->hrd_buffer_size = DEFAULT_HRD_BUFFER_SIZE;
+	open_params->hrd_buffer_size = imx_vpu_enc->hrd_buffer_size;
+	open_params->qp_min_inter = imx_vpu_enc->qp_min;
+	open_params->qp_min_intra = imx_vpu_enc->qp_min_intra;
+	open_params->static_scene_ibit_percent = imx_vpu_enc->static_scene_ibit_percent;
 	GST_OBJECT_UNLOCK(imx_vpu_enc);
 
 	GST_DEBUG_OBJECT(encoder, "setting bitrate to %u kbps and GOP size to %u", open_params->bitrate, open_params->gop_size);
@@ -1306,6 +1354,19 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
 		)
 	);
+
+	g_object_class_install_property(object_class, PROP_QP_MIN,
+		g_param_spec_uint("qp-min", "Min QP (P/B)",
+			"Minimum quantization parameter for P/B frames (quality ceiling); lower = sharper but bigger frames. 0 = let rate control decide",
+			0, 51, DEFAULT_QP_MIN, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(object_class, PROP_QP_MIN_INTRA,
+		g_param_spec_uint("qp-min-intra", "Min QP (I)",
+			"Minimum quantization parameter for I frames; lower = sharper keyframes but bigger. 0 = let rate control decide",
+			0, 51, DEFAULT_QP_MIN_INTRA, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(object_class, PROP_STATIC_SCENE_IBIT_PERCENT,
+		g_param_spec_uint("static-scene-ibit-percent", "Static-scene intra bit %",
+			"Extra bits (%) the encoder spends on intra content in detected static scenes; 0 = off (flat, no static-scene spike), higher = sharper static but bigger periodic refresh spike",
+			0, 100, DEFAULT_STATIC_SCENE_IBIT_PERCENT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	longname = g_strdup_printf("i.MX VPU %s video encoder", codec_details->desc_name);
 	classification = g_strdup("Codec/Encoder/Video/Hardware");
