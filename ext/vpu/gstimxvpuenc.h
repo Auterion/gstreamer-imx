@@ -44,6 +44,8 @@ G_BEGIN_DECLS
 typedef struct _GstImxVpuEnc GstImxVpuEnc;
 typedef struct _GstImxVpuEncClass GstImxVpuEncClass;
 
+#define GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE 32
+
 
 struct _GstImxVpuEnc
 {
@@ -133,6 +135,11 @@ struct _GstImxVpuEnc
 	 * Precomputed as config_interval_frames during set_format. */
 	gint config_interval;
 	guint config_interval_frames;
+
+	GMutex intra_region_mutex;
+	guint intra_region_q_first[GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE];
+	guint intra_region_q_num[GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE];
+	int intra_region_q_count;
 };
 
 
@@ -149,6 +156,8 @@ struct _GstImxVpuEncClass
 
 	gboolean (*set_open_params)(GstImxVpuEnc *imx_vpu_enc, ImxVpuApiEncOpenParams *open_params);
 	GstCaps* (*get_output_caps)(GstImxVpuEnc *imx_vpu_enc, ImxVpuApiEncStreamInfo const *stream_info);
+
+	void (*request_intra_region)(GstImxVpuEnc *imx_vpu_enc, guint first_ctb_row, guint num_ctb_rows);
 
 	gboolean use_idr_frame_type_for_keyframes;
 };

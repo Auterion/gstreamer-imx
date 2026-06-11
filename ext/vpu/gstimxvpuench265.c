@@ -28,7 +28,8 @@ enum
 	PROP_ENABLE_AUD,
 	PROP_USE_ROLLING_SLICES,
 	PROP_USE_ROLLING_TILES,
-	PROP_CONFIG_INTERVAL
+	PROP_CONFIG_INTERVAL,
+	PROP_ROLL_SIZE
 };
 
 
@@ -36,6 +37,7 @@ enum
 #define DEFAULT_USE_ROLLING_SLICES      0
 #define DEFAULT_USE_ROLLING_TILES       0
 #define DEFAULT_CONFIG_INTERVAL         (-1)
+#define DEFAULT_ROLL_SIZE               0
 
 
 GST_DEBUG_CATEGORY_STATIC(imx_vpu_enc_h265_debug);
@@ -50,6 +52,7 @@ struct _GstImxVpuEncH265
 	guint use_rolling_slices;
 	guint use_rolling_tiles;
 	gint config_interval;
+	guint roll_size;
 };
 
 
@@ -140,6 +143,22 @@ static void gst_imx_vpu_enc_h265_class_init(GstImxVpuEncH265Class *klass)
 			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
 		)
 	);
+
+	g_object_class_install_property(
+		object_class,
+		PROP_ROLL_SIZE,
+		g_param_spec_uint(
+			"roll-size",
+			"Rolling intra refresh sweep period",
+			"Frames over which the rolling intra wave refreshes all slices once "
+			"(front-loaded each GOP), giving a per-slice cadence of roll-size/slices "
+			"frames. That cadence is also the minimum gap between any two slice "
+			"refreshes (wave or SLI-forced), bounding the bitrate. 0 = use gop-size.",
+			0, G_MAXUINT16,
+			DEFAULT_ROLL_SIZE,
+			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+		)
+	);
 }
 
 
@@ -150,6 +169,7 @@ static void gst_imx_vpu_enc_h265_init(GstImxVpuEncH265 *imx_vpu_enc_h265)
 	imx_vpu_enc_h265->use_rolling_slices = DEFAULT_USE_ROLLING_SLICES;
 	imx_vpu_enc_h265->use_rolling_tiles = DEFAULT_USE_ROLLING_TILES;
 	imx_vpu_enc_h265->config_interval = DEFAULT_CONFIG_INTERVAL;
+	imx_vpu_enc_h265->roll_size = DEFAULT_ROLL_SIZE;
 }
 
 
@@ -180,6 +200,12 @@ static void gst_imx_vpu_enc_h265_set_encoder_property(GObject *object, guint pro
 		case PROP_CONFIG_INTERVAL:
 			GST_OBJECT_LOCK(imx_vpu_enc_h265);
 			imx_vpu_enc_h265->config_interval = g_value_get_int(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
+			break;
+
+		case PROP_ROLL_SIZE:
+			GST_OBJECT_LOCK(imx_vpu_enc_h265);
+			imx_vpu_enc_h265->roll_size = g_value_get_uint(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
 			break;
 
@@ -216,6 +242,12 @@ static void gst_imx_vpu_enc_h265_get_encoder_property(GObject *object, guint pro
 		case PROP_CONFIG_INTERVAL:
 			GST_OBJECT_LOCK(imx_vpu_enc_h265);
 			g_value_set_int(value, imx_vpu_enc_h265->config_interval);
+			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
+			break;
+
+		case PROP_ROLL_SIZE:
+			GST_OBJECT_LOCK(imx_vpu_enc_h265);
+			g_value_set_uint(value, imx_vpu_enc_h265->roll_size);
 			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
 			break;
 
@@ -331,6 +363,7 @@ gboolean gst_imx_vpu_enc_h265_set_open_params(GstImxVpuEnc *imx_vpu_enc, ImxVpuA
 
 	open_params->num_rolling_slices = num_rolling_slices;
 	open_params->num_rolling_tiles = num_rolling_tiles;
+	open_params->roll_size = (uint16_t)GST_IMX_VPU_ENC_H265_CAST(imx_vpu_enc)->roll_size;
 
 	/* Precompute config-interval in frames and store in base encoder. */
 	imx_vpu_enc->config_interval = config_interval;

@@ -104,6 +104,8 @@ static gboolean gst_imx_vpu_enc_propose_allocation(GstVideoEncoder *encoder, Gst
 static gboolean gst_imx_vpu_enc_create_dma_buffer_pool(GstImxVpuEnc *imx_vpu_enc);
 static void gst_imx_vpu_enc_free_fb_pool_dmabuffers(GstImxVpuEnc *imx_vpu_enc);
 static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_enc);
+static void gst_imx_vpu_enc_finalize(GObject *object);
+static void gst_imx_vpu_enc_request_intra_region(GstImxVpuEnc *imx_vpu_enc, guint first_ctb_row, guint num_ctb_rows);
 
 
 static void gst_imx_vpu_enc_class_init(GstImxVpuEncClass *klass)
@@ -119,6 +121,18 @@ static void gst_imx_vpu_enc_class_init(GstImxVpuEncClass *klass)
 	video_encoder_class = GST_VIDEO_ENCODER_CLASS(klass);
 
 	object_class->dispose                   = GST_DEBUG_FUNCPTR(gst_imx_vpu_enc_dispose);
+	object_class->finalize                  = GST_DEBUG_FUNCPTR(gst_imx_vpu_enc_finalize);
+
+	klass->request_intra_region = gst_imx_vpu_enc_request_intra_region;
+
+	g_signal_new(
+		"request-intra-region",
+		G_TYPE_FROM_CLASS(klass),
+		G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
+		G_STRUCT_OFFSET(GstImxVpuEncClass, request_intra_region),
+		NULL, NULL, NULL,
+		G_TYPE_NONE, 2, G_TYPE_UINT, G_TYPE_UINT
+	);
 
 	video_encoder_class->start              = GST_DEBUG_FUNCPTR(gst_imx_vpu_enc_start);
 	video_encoder_class->stop               = GST_DEBUG_FUNCPTR(gst_imx_vpu_enc_stop);
@@ -161,6 +175,9 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->config_interval_frames = 0;
 
 	imx_vpu_enc->fatal_error_cannot_encode = FALSE;
+
+	g_mutex_init(&(imx_vpu_enc->intra_region_mutex));
+	imx_vpu_enc->intra_region_q_count = 0;
 }
 
 
@@ -176,6 +193,36 @@ static void gst_imx_vpu_enc_dispose(GObject *object)
 	}
 
 	G_OBJECT_CLASS(gst_imx_vpu_enc_parent_class)->dispose(object);
+}
+
+
+static void gst_imx_vpu_enc_finalize(GObject *object)
+{
+	GstImxVpuEnc *imx_vpu_enc = GST_IMX_VPU_ENC(object);
+
+	g_mutex_clear(&(imx_vpu_enc->intra_region_mutex));
+
+	G_OBJECT_CLASS(gst_imx_vpu_enc_parent_class)->finalize(object);
+}
+
+
+static void gst_imx_vpu_enc_request_intra_region(GstImxVpuEnc *imx_vpu_enc, guint first_ctb_row, guint num_ctb_rows)
+{
+	if (num_ctb_rows == 0)
+		return;
+
+	g_mutex_lock(&(imx_vpu_enc->intra_region_mutex));
+	if (imx_vpu_enc->intra_region_q_count < GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE)
+	{
+		int i = imx_vpu_enc->intra_region_q_count;
+		imx_vpu_enc->intra_region_q_first[i] = first_ctb_row;
+		imx_vpu_enc->intra_region_q_num[i] = num_ctb_rows;
+		imx_vpu_enc->intra_region_q_count++;
+	}
+	g_mutex_unlock(&(imx_vpu_enc->intra_region_mutex));
+
+	GST_DEBUG_OBJECT(imx_vpu_enc, "request-intra-region: CTB rows %u..%u",
+		first_ctb_row, first_ctb_row + num_ctb_rows - 1);
 }
 
 
@@ -715,6 +762,23 @@ static GstFlowReturn gst_imx_vpu_enc_handle_frame(GstVideoEncoder *encoder, GstV
 
 		if (force_keyframe)
 			raw_frame.frame_types[0] = klass->use_idr_frame_type_for_keyframes ? IMX_VPU_API_FRAME_TYPE_IDR : IMX_VPU_API_FRAME_TYPE_I;
+
+		{
+			guint qf[GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE];
+			guint qn[GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE];
+			int qc, qi;
+			g_mutex_lock(&(imx_vpu_enc->intra_region_mutex));
+			qc = imx_vpu_enc->intra_region_q_count;
+			for (qi = 0; qi < qc; qi++)
+			{
+				qf[qi] = imx_vpu_enc->intra_region_q_first[qi];
+				qn[qi] = imx_vpu_enc->intra_region_q_num[qi];
+			}
+			imx_vpu_enc->intra_region_q_count = 0;
+			g_mutex_unlock(&(imx_vpu_enc->intra_region_mutex));
+			for (qi = 0; qi < qc; qi++)
+				imx_vpu_api_enc_set_intra_refresh_region(imx_vpu_enc->encoder, qf[qi], qn[qi]);
+		}
 
 		/* The actual encoding */
 		if ((enc_ret = imx_vpu_api_enc_push_raw_frame(imx_vpu_enc->encoder, &raw_frame)) != IMX_VPU_API_ENC_RETURN_CODE_OK)
