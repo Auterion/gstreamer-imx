@@ -121,6 +121,7 @@ struct _GstImxVpuEnc
 	guint qp_min;
 	guint qp_min_intra;
 	guint static_scene_ibit_percent;
+	guint gdr_refresh_period;
 
 	/* Cached VPS/SPS/PPS parameter sets for periodic re-insertion.
 	 * Captured from the first encoded frame's header data. */

@@ -72,7 +72,8 @@ enum
 	PROP_USE_HRD,
 	PROP_QP_MIN,
 	PROP_QP_MIN_INTRA,
-	PROP_STATIC_SCENE_IBIT_PERCENT
+	PROP_STATIC_SCENE_IBIT_PERCENT,
+	PROP_GDR_REFRESH_PERIOD
 };
 
 
@@ -89,6 +90,7 @@ enum
 #define DEFAULT_QP_MIN                  0
 #define DEFAULT_QP_MIN_INTRA            0
 #define DEFAULT_STATIC_SCENE_IBIT_PERCENT 0
+#define DEFAULT_GDR_REFRESH_PERIOD      0
 
 
 G_DEFINE_ABSTRACT_TYPE(GstImxVpuEnc, gst_imx_vpu_enc, GST_TYPE_VIDEO_ENCODER)
@@ -165,6 +167,7 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->qp_min = DEFAULT_QP_MIN;
 	imx_vpu_enc->qp_min_intra = DEFAULT_QP_MIN_INTRA;
 	imx_vpu_enc->static_scene_ibit_percent = DEFAULT_STATIC_SCENE_IBIT_PERCENT;
+	imx_vpu_enc->gdr_refresh_period = DEFAULT_GDR_REFRESH_PERIOD;
 
 	imx_vpu_enc->stream_buffer = NULL;
 	imx_vpu_enc->encoder = NULL;
@@ -328,6 +331,12 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
+		case PROP_GDR_REFRESH_PERIOD:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->gdr_refresh_period = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
 		default:
 			if (klass->set_encoder_property != NULL)
 				klass->set_encoder_property(object, prop_id, value, pspec);
@@ -426,6 +435,12 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 		case PROP_STATIC_SCENE_IBIT_PERCENT:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			g_value_set_uint(value, imx_vpu_enc->static_scene_ibit_percent);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_GDR_REFRESH_PERIOD:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->gdr_refresh_period);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -630,6 +645,7 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	open_params->qp_min_inter = imx_vpu_enc->qp_min;
 	open_params->qp_min_intra = imx_vpu_enc->qp_min_intra;
 	open_params->static_scene_ibit_percent = imx_vpu_enc->static_scene_ibit_percent;
+	open_params->gdr_refresh_period = imx_vpu_enc->gdr_refresh_period;
 	GST_OBJECT_UNLOCK(imx_vpu_enc);
 
 	GST_DEBUG_OBJECT(encoder, "setting bitrate to %u kbps and GOP size to %u", open_params->bitrate, open_params->gop_size);
@@ -1367,6 +1383,10 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 		g_param_spec_uint("static-scene-ibit-percent", "Static-scene intra bit %",
 			"Extra bits (%) the encoder spends on intra content in detected static scenes; 0 = off (flat, no static-scene spike), higher = sharper static but bigger periodic refresh spike",
 			0, 100, DEFAULT_STATIC_SCENE_IBIT_PERCENT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(object_class, PROP_GDR_REFRESH_PERIOD,
+		g_param_spec_uint("gdr-refresh-period", "GDR refresh period",
+			"Intra-refresh + recovery-point-SEI period in frames for use-intra-refresh mode, decoupled from gop-size (which stays the rate-control window). 0 = use gop-size. Smaller = smaller periodic refresh spike + faster mid-stream join; quality plateaus around 16",
+			0, 255, DEFAULT_GDR_REFRESH_PERIOD, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	longname = g_strdup_printf("i.MX VPU %s video encoder", codec_details->desc_name);
 	classification = g_strdup("Codec/Encoder/Video/Hardware");
