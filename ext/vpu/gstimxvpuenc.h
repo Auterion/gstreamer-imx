@@ -123,6 +123,7 @@ struct _GstImxVpuEnc
 	guint static_scene_ibit_percent;
 	guint gdr_refresh_period;
 	guint rotation;
+	guint rate_control;
 
 	/* Cached VPS/SPS/PPS parameter sets for periodic re-insertion.
 	 * Captured from the first encoded frame's header data. */
