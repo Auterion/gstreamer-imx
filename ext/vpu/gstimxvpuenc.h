@@ -124,6 +124,8 @@ struct _GstImxVpuEnc
 	guint gdr_refresh_period;
 	guint rotation;
 	guint rate_control;
+	guint qp_max;
+	guint qp_max_intra;
 
 	/* Cached VPS/SPS/PPS parameter sets for periodic re-insertion.
 	 * Captured from the first encoded frame's header data. */

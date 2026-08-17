@@ -75,7 +75,9 @@ enum
 	PROP_STATIC_SCENE_IBIT_PERCENT,
 	PROP_GDR_REFRESH_PERIOD,
 	PROP_ROTATION,
-	PROP_RATE_CONTROL
+	PROP_RATE_CONTROL,
+	PROP_QP_MAX,
+	PROP_QP_MAX_INTRA
 };
 
 
@@ -95,6 +97,8 @@ enum
 #define DEFAULT_GDR_REFRESH_PERIOD      0
 #define DEFAULT_ROTATION                0
 #define DEFAULT_RATE_CONTROL            0
+#define DEFAULT_QP_MAX                  0
+#define DEFAULT_QP_MAX_INTRA            0
 
 
 G_DEFINE_ABSTRACT_TYPE(GstImxVpuEnc, gst_imx_vpu_enc, GST_TYPE_VIDEO_ENCODER)
@@ -174,6 +178,8 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->gdr_refresh_period = DEFAULT_GDR_REFRESH_PERIOD;
 	imx_vpu_enc->rotation = DEFAULT_ROTATION;
 	imx_vpu_enc->rate_control = DEFAULT_RATE_CONTROL;
+	imx_vpu_enc->qp_max = DEFAULT_QP_MAX;
+	imx_vpu_enc->qp_max_intra = DEFAULT_QP_MAX_INTRA;
 
 	imx_vpu_enc->stream_buffer = NULL;
 	imx_vpu_enc->encoder = NULL;
@@ -352,6 +358,18 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
+		case PROP_QP_MAX:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->qp_max = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_QP_MAX_INTRA:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->qp_max_intra = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
 		default:
 			if (klass->set_encoder_property != NULL)
 				klass->set_encoder_property(object, prop_id, value, pspec);
@@ -465,6 +483,18 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 		case PROP_RATE_CONTROL:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			g_value_set_uint(value, imx_vpu_enc->rate_control);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_QP_MAX:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->qp_max);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_QP_MAX_INTRA:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->qp_max_intra);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -674,6 +704,8 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	open_params->rotation_180 = (imx_vpu_enc->rotation == 180);
 	rotation = imx_vpu_enc->rotation;
 	open_params->rate_control_mode = imx_vpu_enc->rate_control;
+	open_params->qp_max_inter = imx_vpu_enc->qp_max;
+	open_params->qp_max_intra = imx_vpu_enc->qp_max_intra;
 	GST_OBJECT_UNLOCK(imx_vpu_enc);
 
 	if ((rotation != 0) && (rotation != 180))
@@ -1414,6 +1446,14 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 		g_param_spec_uint("qp-min-intra", "Min QP (I)",
 			"Minimum quantization parameter for I frames; lower = sharper keyframes but bigger. 0 = let rate control decide",
 			0, 51, DEFAULT_QP_MIN_INTRA, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(object_class, PROP_QP_MAX,
+		g_param_spec_uint("qp-max", "Max QP (P/B)",
+			"Maximum quantization parameter for P/B frames (quality floor); lower = better worst-case quality but bigger frames. 0 = let the codec decide (51, no ceiling)",
+			0, 51, DEFAULT_QP_MAX, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(object_class, PROP_QP_MAX_INTRA,
+		g_param_spec_uint("qp-max-intra", "Max QP (I)",
+			"Maximum quantization parameter for I frames; lower = better worst-case keyframe quality but bigger keyframes. 0 = let the codec decide (51, no ceiling)",
+			0, 51, DEFAULT_QP_MAX_INTRA, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(object_class, PROP_STATIC_SCENE_IBIT_PERCENT,
 		g_param_spec_uint("static-scene-ibit-percent", "Static-scene intra bit %",
 			"Extra bits (%) the encoder spends on intra content in detected static scenes; 0 = off (flat, no static-scene spike), higher = sharper static but bigger periodic refresh spike",
