@@ -111,21 +111,36 @@ struct _GstImxVpuEnc
 	guint closed_gop_interval;
 	guint bitrate;
 	guint quantization;
-	guint intra_refresh;
 	guint fixed_intra_quantization;
 	gboolean allow_frameskipping;
-	gboolean use_intra_refresh;
 	gint intra_qp_bias;
 	guint hrd_buffer_size;
 	gboolean use_hrd;
 	guint qp_min;
 	guint qp_min_intra;
 	guint static_scene_ibit_percent;
-	guint gdr_refresh_period;
 	guint rotation;
 	guint rate_control;
 	guint qp_max;
 	guint qp_max_intra;
+
+	/* Intra refresh: one band of CTB rows coded intra per picture, sweeping
+	 * top to bottom, so the stream stays decodable with no periodic IDR. */
+	gboolean intra_refresh;
+	guint intra_refresh_period;
+	guint intra_refresh_duration;
+	guint intra_refresh_rows;
+	guint slice_height;
+	guint slice_count;
+
+	/* Deprecated, kept working and mapped onto the fields above. One bit per
+	 * property in deprecation_warned, so the notice is logged once. */
+	guint32 deprecation_warned;
+	gboolean use_intra_refresh;
+	guint gdr_refresh_period;
+	guint use_rolling_slices;
+	guint use_rolling_tiles;
+	guint roll_size;
 
 	/* Cached VPS/SPS/PPS parameter sets for periodic re-insertion.
 	 * Captured from the first encoded frame's header data. */

@@ -26,18 +26,12 @@ enum
 {
 	PROP_0 = GST_IMX_VPU_ENC_BASE_PROP_VALUE,
 	PROP_ENABLE_AUD,
-	PROP_USE_ROLLING_SLICES,
-	PROP_USE_ROLLING_TILES,
-	PROP_CONFIG_INTERVAL,
-	PROP_ROLL_SIZE
+	PROP_CONFIG_INTERVAL
 };
 
 
 #define DEFAULT_ENABLE_AUD              TRUE
-#define DEFAULT_USE_ROLLING_SLICES      0
-#define DEFAULT_USE_ROLLING_TILES       0
 #define DEFAULT_CONFIG_INTERVAL         (-1)
-#define DEFAULT_ROLL_SIZE               0
 
 
 GST_DEBUG_CATEGORY_STATIC(imx_vpu_enc_h265_debug);
@@ -49,10 +43,7 @@ struct _GstImxVpuEncH265
 	GstImxVpuEnc parent;
 
 	gboolean enable_aud;
-	guint use_rolling_slices;
-	guint use_rolling_tiles;
 	gint config_interval;
-	guint roll_size;
 };
 
 
@@ -102,31 +93,7 @@ static void gst_imx_vpu_enc_h265_class_init(GstImxVpuEncH265Class *klass)
 		)
 	);
 
-	g_object_class_install_property(
-		object_class,
-		PROP_USE_ROLLING_SLICES,
-		g_param_spec_uint(
-			"use-rolling-slices",
-			"Use rolling intra slice refresh",
-			"Rolling intra slice refresh: 0=disabled (keyframe mode), 1=auto (4 slices), 2..16=explicit slice count",
-			0, 16,
-			DEFAULT_USE_ROLLING_SLICES,
-			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
-		)
-	);
 
-	g_object_class_install_property(
-		object_class,
-		PROP_USE_ROLLING_TILES,
-		g_param_spec_uint(
-			"use-rolling-tiles",
-			"Use rolling intra tile refresh",
-			"Rolling intra tile refresh (2-column grid): 0=disabled (keyframe mode), 1=auto (2x2 grid), 2/4/6.../16=explicit tile count (must be even)",
-			0, 16,
-			DEFAULT_USE_ROLLING_TILES,
-			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
-		)
-	);
 
 	g_object_class_install_property(
 		object_class,
@@ -144,21 +111,6 @@ static void gst_imx_vpu_enc_h265_class_init(GstImxVpuEncH265Class *klass)
 		)
 	);
 
-	g_object_class_install_property(
-		object_class,
-		PROP_ROLL_SIZE,
-		g_param_spec_uint(
-			"roll-size",
-			"Rolling intra refresh sweep period",
-			"Frames over which the rolling intra wave refreshes all slices once "
-			"(front-loaded each GOP), giving a per-slice cadence of roll-size/slices "
-			"frames. That cadence is also the minimum gap between any two slice "
-			"refreshes (wave or SLI-forced), bounding the bitrate. 0 = use gop-size.",
-			0, G_MAXUINT16,
-			DEFAULT_ROLL_SIZE,
-			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
-		)
-	);
 }
 
 
@@ -166,10 +118,7 @@ static void gst_imx_vpu_enc_h265_init(GstImxVpuEncH265 *imx_vpu_enc_h265)
 {
 	gst_imx_vpu_enc_common_init(GST_IMX_VPU_ENC_CAST(imx_vpu_enc_h265));
 	imx_vpu_enc_h265->enable_aud = DEFAULT_ENABLE_AUD;
-	imx_vpu_enc_h265->use_rolling_slices = DEFAULT_USE_ROLLING_SLICES;
-	imx_vpu_enc_h265->use_rolling_tiles = DEFAULT_USE_ROLLING_TILES;
 	imx_vpu_enc_h265->config_interval = DEFAULT_CONFIG_INTERVAL;
-	imx_vpu_enc_h265->roll_size = DEFAULT_ROLL_SIZE;
 }
 
 
@@ -185,27 +134,9 @@ static void gst_imx_vpu_enc_h265_set_encoder_property(GObject *object, guint pro
 			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
 			break;
 
-		case PROP_USE_ROLLING_SLICES:
-			GST_OBJECT_LOCK(imx_vpu_enc_h265);
-			imx_vpu_enc_h265->use_rolling_slices = g_value_get_uint(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
-			break;
-
-		case PROP_USE_ROLLING_TILES:
-			GST_OBJECT_LOCK(imx_vpu_enc_h265);
-			imx_vpu_enc_h265->use_rolling_tiles = g_value_get_uint(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
-			break;
-
 		case PROP_CONFIG_INTERVAL:
 			GST_OBJECT_LOCK(imx_vpu_enc_h265);
 			imx_vpu_enc_h265->config_interval = g_value_get_int(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
-			break;
-
-		case PROP_ROLL_SIZE:
-			GST_OBJECT_LOCK(imx_vpu_enc_h265);
-			imx_vpu_enc_h265->roll_size = g_value_get_uint(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
 			break;
 
@@ -227,27 +158,9 @@ static void gst_imx_vpu_enc_h265_get_encoder_property(GObject *object, guint pro
 			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
 			break;
 
-		case PROP_USE_ROLLING_SLICES:
-			GST_OBJECT_LOCK(imx_vpu_enc_h265);
-			g_value_set_uint(value, imx_vpu_enc_h265->use_rolling_slices);
-			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
-			break;
-
-		case PROP_USE_ROLLING_TILES:
-			GST_OBJECT_LOCK(imx_vpu_enc_h265);
-			g_value_set_uint(value, imx_vpu_enc_h265->use_rolling_tiles);
-			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
-			break;
-
 		case PROP_CONFIG_INTERVAL:
 			GST_OBJECT_LOCK(imx_vpu_enc_h265);
 			g_value_set_int(value, imx_vpu_enc_h265->config_interval);
-			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
-			break;
-
-		case PROP_ROLL_SIZE:
-			GST_OBJECT_LOCK(imx_vpu_enc_h265);
-			g_value_set_uint(value, imx_vpu_enc_h265->roll_size);
 			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
 			break;
 
@@ -323,47 +236,31 @@ gboolean gst_imx_vpu_enc_h265_set_open_params(GstImxVpuEnc *imx_vpu_enc, ImxVpuA
 
 	GST_OBJECT_LOCK(imx_vpu_enc);
 	h265_params->enable_access_unit_delimiters = GST_IMX_VPU_ENC_H265_CAST(imx_vpu_enc)->enable_aud;
-	guint num_rolling_slices = GST_IMX_VPU_ENC_H265_CAST(imx_vpu_enc)->use_rolling_slices;
-	guint num_rolling_tiles = GST_IMX_VPU_ENC_H265_CAST(imx_vpu_enc)->use_rolling_tiles;
 	gint config_interval = GST_IMX_VPU_ENC_H265_CAST(imx_vpu_enc)->config_interval;
 	GST_OBJECT_UNLOCK(imx_vpu_enc);
 
-	if ((num_rolling_tiles >= 2) && (num_rolling_tiles % 2 != 0))
+	/* use-rolling-slices, use-rolling-tiles and roll-size moved to the base
+	 * class, because intra refresh is not H.265 only any more; the library
+	 * maps all three onto the unified fields. What is still worth refusing
+	 * is asking for two of the deprecated modes at once, since they used to
+	 * be mutually exclusive and there is no sensible way to honour both.
+	 * The unified properties deliberately do not conflict with them: an
+	 * explicit intra-refresh-rows or slice-count simply wins. */
+	if ((open_params->num_rolling_tiles >= 2) && ((open_params->num_rolling_tiles % 2) != 0))
 	{
-		GST_ERROR_OBJECT(imx_vpu_enc, "use-rolling-tiles=%u is invalid: tile count must be 0 (disabled), 1 (auto/2x2), or an even number (2,4,6,...,16)", num_rolling_tiles);
+		GST_ERROR_OBJECT(imx_vpu_enc, "use-rolling-tiles=%u is invalid: tile count must be "
+		                 "0 (disabled), 1 (auto/2x2), or an even number (2,4,6,...,16)",
+		                 open_params->num_rolling_tiles);
 		ret = FALSE;
 		goto finish;
 	}
-
-	gboolean use_gdr   = !!(open_params->flags & IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_USE_INTRA_REFRESH);
-	gboolean use_slices = (num_rolling_slices != 0);
-	gboolean use_tiles  = (num_rolling_tiles != 0);
-
-	if (use_gdr && use_slices)
-	{
-		GST_ERROR_OBJECT(imx_vpu_enc,
-			"use-intra-refresh and use-rolling-slices are mutually exclusive");
-		ret = FALSE;
-		goto finish;
-	}
-	if (use_gdr && use_tiles)
-	{
-		GST_ERROR_OBJECT(imx_vpu_enc,
-			"use-intra-refresh and use-rolling-tiles are mutually exclusive");
-		ret = FALSE;
-		goto finish;
-	}
-	if (use_slices && use_tiles)
+	if ((open_params->num_rolling_slices != 0) && (open_params->num_rolling_tiles != 0))
 	{
 		GST_ERROR_OBJECT(imx_vpu_enc,
 			"use-rolling-slices and use-rolling-tiles are mutually exclusive");
 		ret = FALSE;
 		goto finish;
 	}
-
-	open_params->num_rolling_slices = num_rolling_slices;
-	open_params->num_rolling_tiles = num_rolling_tiles;
-	open_params->roll_size = (uint16_t)GST_IMX_VPU_ENC_H265_CAST(imx_vpu_enc)->roll_size;
 
 	/* Precompute config-interval in frames and store in base encoder. */
 	imx_vpu_enc->config_interval = config_interval;

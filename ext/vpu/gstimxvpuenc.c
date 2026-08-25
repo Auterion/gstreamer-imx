@@ -77,14 +77,22 @@ enum
 	PROP_ROTATION,
 	PROP_RATE_CONTROL,
 	PROP_QP_MAX,
-	PROP_QP_MAX_INTRA
+	PROP_QP_MAX_INTRA,
+	PROP_INTRA_REFRESH_PERIOD,
+	PROP_INTRA_REFRESH_DURATION,
+	PROP_INTRA_REFRESH_ROWS,
+	PROP_SLICE_HEIGHT,
+	PROP_SLICE_COUNT,
+	PROP_USE_ROLLING_SLICES,
+	PROP_USE_ROLLING_TILES,
+	PROP_ROLL_SIZE
 };
 
 
 #define DEFAULT_GOP_SIZE                 16
 #define DEFAULT_CLOSED_GOP_INTERVAL      0
 #define DEFAULT_BITRATE                  0
-#define DEFAULT_INTRA_REFRESH            0
+#define DEFAULT_INTRA_REFRESH            FALSE
 #define DEFAULT_FIXED_INTRA_QUANTIZATION 0
 #define DEFAULT_ALLOW_FRAMESKIPPING      FALSE
 #define DEFAULT_USE_INTRA_REFRESH        FALSE
@@ -99,6 +107,14 @@ enum
 #define DEFAULT_RATE_CONTROL            0
 #define DEFAULT_QP_MAX                  0
 #define DEFAULT_QP_MAX_INTRA            0
+#define DEFAULT_INTRA_REFRESH_PERIOD    0
+#define DEFAULT_INTRA_REFRESH_DURATION  0
+#define DEFAULT_INTRA_REFRESH_ROWS      0
+#define DEFAULT_SLICE_HEIGHT            0
+#define DEFAULT_SLICE_COUNT             0
+#define DEFAULT_USE_ROLLING_SLICES      0
+#define DEFAULT_USE_ROLLING_TILES       0
+#define DEFAULT_ROLL_SIZE               0
 
 
 G_DEFINE_ABSTRACT_TYPE(GstImxVpuEnc, gst_imx_vpu_enc, GST_TYPE_VIDEO_ENCODER)
@@ -180,6 +196,14 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->rate_control = DEFAULT_RATE_CONTROL;
 	imx_vpu_enc->qp_max = DEFAULT_QP_MAX;
 	imx_vpu_enc->qp_max_intra = DEFAULT_QP_MAX_INTRA;
+	imx_vpu_enc->intra_refresh_period = DEFAULT_INTRA_REFRESH_PERIOD;
+	imx_vpu_enc->intra_refresh_duration = DEFAULT_INTRA_REFRESH_DURATION;
+	imx_vpu_enc->intra_refresh_rows = DEFAULT_INTRA_REFRESH_ROWS;
+	imx_vpu_enc->slice_height = DEFAULT_SLICE_HEIGHT;
+	imx_vpu_enc->slice_count = DEFAULT_SLICE_COUNT;
+	imx_vpu_enc->use_rolling_slices = DEFAULT_USE_ROLLING_SLICES;
+	imx_vpu_enc->use_rolling_tiles = DEFAULT_USE_ROLLING_TILES;
+	imx_vpu_enc->roll_size = DEFAULT_ROLL_SIZE;
 
 	imx_vpu_enc->stream_buffer = NULL;
 	imx_vpu_enc->encoder = NULL;
@@ -250,6 +274,28 @@ static void gst_imx_vpu_enc_request_intra_region(GstImxVpuEnc *imx_vpu_enc, guin
 }
 
 
+/* Say it once per element and per property, at a level a normal log shows.
+ * Glib only complains about G_PARAM_DEPRECATED when G_ENABLE_DIAGNOSTIC is
+ * set, which nothing on the target sets, so a pipeline could go on using a
+ * deprecated property indefinitely without anything saying so.
+ *
+ * Only when the value actually selects the deprecated behaviour. Plenty of
+ * callers set every property they know about, including to the default that
+ * means "off", and warning about those would be noise that trains people to
+ * ignore the ones that matter. */
+static void gst_imx_vpu_enc_warn_deprecated(GstImxVpuEnc *imx_vpu_enc, guint bit,
+                                            gboolean in_use,
+                                            gchar const *old_name, gchar const *new_name)
+{
+	if (!in_use || (imx_vpu_enc->deprecation_warned & (1u << bit)))
+		return;
+
+	imx_vpu_enc->deprecation_warned |= (1u << bit);
+	GST_WARNING_OBJECT(imx_vpu_enc, "the \"%s\" property is deprecated; use %s instead",
+	                   old_name, new_name);
+}
+
+
 static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue const *value, GParamSpec *pspec)
 {
 	GstImxVpuEnc *imx_vpu_enc = GST_IMX_VPU_ENC(object);
@@ -285,8 +331,63 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 
 		case PROP_INTRA_REFRESH:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->intra_refresh = g_value_get_uint(value);
+			imx_vpu_enc->intra_refresh = g_value_get_boolean(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_INTRA_REFRESH_PERIOD:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->intra_refresh_period = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_INTRA_REFRESH_DURATION:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->intra_refresh_duration = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_INTRA_REFRESH_ROWS:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->intra_refresh_rows = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_SLICE_HEIGHT:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->slice_height = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_SLICE_COUNT:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->slice_count = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_USE_ROLLING_SLICES:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->use_rolling_slices = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			gst_imx_vpu_enc_warn_deprecated(imx_vpu_enc, 1, imx_vpu_enc->use_rolling_slices != 0,
+			                                "use-rolling-slices",
+			                                "intra-refresh with intra-refresh-rows and slice-count");
+			break;
+
+		case PROP_USE_ROLLING_TILES:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->use_rolling_tiles = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			gst_imx_vpu_enc_warn_deprecated(imx_vpu_enc, 2, imx_vpu_enc->use_rolling_tiles != 0,
+			                                "use-rolling-tiles", "intra-refresh");
+			break;
+
+		case PROP_ROLL_SIZE:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->roll_size = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			gst_imx_vpu_enc_warn_deprecated(imx_vpu_enc, 3, imx_vpu_enc->roll_size != 0,
+			                                "roll-size", "intra-refresh-period");
 			break;
 
 		case PROP_FIXED_INTRA_QUANTIZATION:
@@ -305,6 +406,8 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			imx_vpu_enc->use_intra_refresh = g_value_get_boolean(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			gst_imx_vpu_enc_warn_deprecated(imx_vpu_enc, 0, imx_vpu_enc->use_intra_refresh,
+			                                "use-intra-refresh", "intra-refresh");
 			break;
 
 		case PROP_INTRA_QP_BIAS:
@@ -347,6 +450,8 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			imx_vpu_enc->gdr_refresh_period = g_value_get_uint(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			gst_imx_vpu_enc_warn_deprecated(imx_vpu_enc, 4, imx_vpu_enc->gdr_refresh_period != 0,
+			                                "gdr-refresh-period", "intra-refresh-period");
 			break;
 
 		case PROP_ROTATION:
@@ -413,7 +518,55 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 
 		case PROP_INTRA_REFRESH:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->intra_refresh);
+			g_value_set_boolean(value, imx_vpu_enc->intra_refresh);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_INTRA_REFRESH_PERIOD:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->intra_refresh_period);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_INTRA_REFRESH_DURATION:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->intra_refresh_duration);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_INTRA_REFRESH_ROWS:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->intra_refresh_rows);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_SLICE_HEIGHT:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->slice_height);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_SLICE_COUNT:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->slice_count);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_USE_ROLLING_SLICES:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->use_rolling_slices);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_USE_ROLLING_TILES:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->use_rolling_tiles);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_ROLL_SIZE:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->roll_size);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -690,19 +843,35 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	open_params->gop_size = imx_vpu_enc->gop_size;
 	open_params->closed_gop_interval = imx_vpu_enc->closed_gop_interval;
 	open_params->quantization = imx_vpu_enc->quantization;
-	open_params->min_intra_refresh_mb_count = imx_vpu_enc->intra_refresh;
+	/* Cyclic intra refresh. Never reachable any more: the property that fed
+	 * it was a deprecated macroblock count that could not produce a sweep -
+	 * cirStart stayed at 0, so it re-coded the same CTBs in every picture -
+	 * and its name now belongs to the intra refresh switch. */
+	open_params->min_intra_refresh_mb_count = 0;
 	open_params->fixed_intra_quantization = imx_vpu_enc->fixed_intra_quantization;
 	open_params->flags = (imx_vpu_enc->allow_frameskipping ? IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_ALLOW_FRAMESKIPPING : 0)
-	                   | (imx_vpu_enc->use_intra_refresh ? IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_USE_INTRA_REFRESH : 0);
+	                   | ((imx_vpu_enc->intra_refresh || imx_vpu_enc->use_intra_refresh) ? IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_USE_INTRA_REFRESH : 0);
 	open_params->flags |= imx_vpu_enc->use_hrd ? IMX_VPU_API_ENC_H26x_OPEN_PARAMS_FLAG_USE_HRD : 0;
 	open_params->intra_qp_delta = imx_vpu_enc->intra_qp_bias;
 	open_params->hrd_buffer_size = imx_vpu_enc->hrd_buffer_size;
 	open_params->qp_min_inter = imx_vpu_enc->qp_min;
 	open_params->qp_min_intra = imx_vpu_enc->qp_min_intra;
 	open_params->static_scene_ibit_percent = imx_vpu_enc->static_scene_ibit_percent;
+	open_params->intra_refresh_period = imx_vpu_enc->intra_refresh_period;
+	open_params->intra_refresh_duration = imx_vpu_enc->intra_refresh_duration;
+	open_params->intra_refresh_rows = imx_vpu_enc->intra_refresh_rows;
+	open_params->intra_refresh_columns = 0;
+	open_params->slice_height = imx_vpu_enc->slice_height;
+	open_params->slice_count = imx_vpu_enc->slice_count;
+	/* The deprecated properties are passed through rather than translated
+	 * here: the library maps them, so every caller of it - the element, the
+	 * tools, anything else - gets the same mapping. */
 	open_params->gdr_refresh_period = imx_vpu_enc->gdr_refresh_period;
 	open_params->rotation_180 = (imx_vpu_enc->rotation == 180);
 	rotation = imx_vpu_enc->rotation;
+	open_params->num_rolling_slices = imx_vpu_enc->use_rolling_slices;
+	open_params->num_rolling_tiles = imx_vpu_enc->use_rolling_tiles;
+	open_params->roll_size = imx_vpu_enc->roll_size;
 	open_params->rate_control_mode = imx_vpu_enc->rate_control;
 	open_params->qp_max_inter = imx_vpu_enc->qp_max;
 	open_params->qp_max_intra = imx_vpu_enc->qp_max_intra;
@@ -716,7 +885,10 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	}
 
 	GST_DEBUG_OBJECT(encoder, "setting bitrate to %u kbps and GOP size to %u", open_params->bitrate, open_params->gop_size);
-	GST_DEBUG_OBJECT(encoder, "setting min intra refresh macroblock count to %u", open_params->min_intra_refresh_mb_count);
+	if (open_params->flags & IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_USE_INTRA_REFRESH)
+		GST_DEBUG_OBJECT(encoder, "intra refresh on: period %u, duration %u, %u CTB row(s) per band",
+		                 open_params->intra_refresh_period, open_params->intra_refresh_duration,
+		                 open_params->intra_refresh_rows);
 
 
 	/* Let the subclass fill the format specific open params. */
@@ -1358,11 +1530,97 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 		g_object_class_install_property(
 			object_class,
 			PROP_INTRA_REFRESH,
-			g_param_spec_uint(
+			g_param_spec_boolean(
 				"intra-refresh",
-				"Intra Refresh",
-				"Minimum number of MBs to encode as intra MB (DEPRECATED: use use-intra-refresh instead)",
-				0, G_MAXUINT, DEFAULT_INTRA_REFRESH,
+				"Intra refresh",
+				"Keep the stream decodable by coding a band of CTB rows intra in every "
+				"picture, sweeping the picture top to bottom, instead of by sending a "
+				"periodic IDR. There is no IDR at all after the first one, so no "
+				"periodic bitrate spike; a decoder joining mid-stream is complete one "
+				"refresh period after the recovery point. Replaces use-intra-refresh, "
+				"use-rolling-slices and use-rolling-tiles",
+				DEFAULT_INTRA_REFRESH,
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+			)
+		);
+		g_object_class_install_property(
+			object_class,
+			PROP_INTRA_REFRESH_PERIOD,
+			g_param_spec_uint(
+				"intra-refresh-period",
+				"Intra refresh period",
+				"How often a refresh sweep starts, in frames; 0 = use gop-size. This is "
+				"decoupled from gop-size, which stays the rate control window. Shorter = "
+				"faster mid-stream join, but a larger share of every picture is intra, so "
+				"quality at a fixed bitrate falls: at 1400 kbps 720p30 on FPV footage a "
+				"30 frame period measures 40.75 dB and an 11 frame one 39.08 dB",
+				0, G_MAXUINT16, DEFAULT_INTRA_REFRESH_PERIOD,
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+			)
+		);
+		g_object_class_install_property(
+			object_class,
+			PROP_INTRA_REFRESH_DURATION,
+			g_param_spec_uint(
+				"intra-refresh-duration",
+				"Intra refresh duration",
+				"How many frames one sweep is spread over; 0 = the whole period, which "
+				"spreads the refresh evenly with no idle gap. A shorter duration bunches "
+				"the same refreshes into fewer pictures: the picture is complete sooner "
+				"after a recovery point, at the same average refresh cost, in exchange "
+				"for frame size jitter (measured +31 ms p99 queueing delay with "
+				"rate-control=1, +56 ms with the built-in one). Clamped down to the period",
+				0, 255, DEFAULT_INTRA_REFRESH_DURATION,
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+			)
+		);
+		g_object_class_install_property(
+			object_class,
+			PROP_INTRA_REFRESH_ROWS,
+			g_param_spec_uint(
+				"intra-refresh-rows",
+				"Intra refresh band height",
+				"Target height of one refresh band, in the encoder's own coding unit "
+				"rows: 64 pixels for h.265, 16 for h.264. A target, not an exact "
+				"height - the sweep is split into ceil(rows-in-picture / this) bands of "
+				"as equal a height as they divide into, so that they cover the picture "
+				"exactly. 0 = a 128 pixel band, which is 2 rows on h.265 and 8 on "
+				"h.264; that measures better than a single CTB row on both test clips "
+				"and with either rate control",
+				0, 255, DEFAULT_INTRA_REFRESH_ROWS,
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+			)
+		);
+		g_object_class_install_property(
+			object_class,
+			PROP_SLICE_HEIGHT,
+			g_param_spec_uint(
+				"slice-height",
+				"Slice height",
+				"Slice height in the encoder's coding unit rows - 64 pixels for h.265, "
+				"16 for h.264; 0 = one slice per picture. "
+				"Slices are full width horizontal bands and nothing else - there is no "
+				"byte or MTU based slicing on this encoder. They confine loss and give "
+				"finer RTP fragmentation, and cost 0.19 dB on FPV footage and 0.70 dB on "
+				"distant aerial footage at a fixed bitrate. Takes precedence over "
+				"slice-count",
+				0, 255, DEFAULT_SLICE_HEIGHT,
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+			)
+		);
+		g_object_class_install_property(
+			object_class,
+			PROP_SLICE_COUNT,
+			g_param_spec_uint(
+				"slice-count",
+				"Slice count",
+				"Slices per picture, as an alternative to naming the height. Only the "
+				"height is programmable - the hardware derives the count from it - so "
+				"most counts do not exist and this rounds down to one that does, logging "
+				"what it got: at 720p h.265, 12 CTB rows, only 1, 2, 3, 4, 6 and 12 are "
+				"achievable, while h.264's 45 macroblock rows allow far more. "
+				"0 or 1 = one slice",
+				0, 255, DEFAULT_SLICE_COUNT,
 				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
 			)
 		);
@@ -1372,9 +1630,52 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 			g_param_spec_boolean(
 				"use-intra-refresh",
 				"Use intra refresh",
-				"Use intra refresh instead of I/IDR frames and group-of-picture (GOP)",
+				"Use intra refresh instead of I/IDR frames and group-of-picture (GOP). "
+				"DEPRECATED: use intra-refresh",
 				DEFAULT_USE_INTRA_REFRESH,
-				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_DEPRECATED
+			)
+		);
+		g_object_class_install_property(
+			object_class,
+			PROP_USE_ROLLING_SLICES,
+			g_param_spec_uint(
+				"use-rolling-slices",
+				"Rolling intra slice refresh",
+				"Rolling intra refresh by full width slice band. 0 = off, 1 = automatic "
+				"(4 slices), 2..16 = slice count. DEPRECATED: use intra-refresh with "
+				"intra-refresh-rows and slice-count",
+				0, 16, DEFAULT_USE_ROLLING_SLICES,
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_DEPRECATED
+			)
+		);
+		g_object_class_install_property(
+			object_class,
+			PROP_USE_ROLLING_TILES,
+			g_param_spec_uint(
+				"use-rolling-tiles",
+				"Rolling intra tile refresh",
+				"Rolling intra refresh by 2D tile, in a fixed 2 column by ceil(N/2) row "
+				"grid. 0 = off, 1 = automatic (2x2), 2/4/.../16 = tile count. These are "
+				"not HEVC tiles - the encoder core ignores its own tile registers - but "
+				"rectangular refresh regions. Half width regions carry no refresh SEI, so "
+				"a receiver cannot track recovery through them. DEPRECATED: use "
+				"intra-refresh",
+				0, 16, DEFAULT_USE_ROLLING_TILES,
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_DEPRECATED
+			)
+		);
+		g_object_class_install_property(
+			object_class,
+			PROP_ROLL_SIZE,
+			g_param_spec_uint(
+				"roll-size",
+				"Rolling intra refresh sweep period",
+				"Frames over which the rolling wave refreshes every region once; 0 = use "
+				"gop-size, and it is clamped to gop-size. DEPRECATED: use "
+				"intra-refresh-period, which is not clamped",
+				0, G_MAXUINT16, DEFAULT_ROLL_SIZE,
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_DEPRECATED
 			)
 		);
 	}
@@ -1460,8 +1761,8 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 			0, 100, DEFAULT_STATIC_SCENE_IBIT_PERCENT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(object_class, PROP_GDR_REFRESH_PERIOD,
 		g_param_spec_uint("gdr-refresh-period", "GDR refresh period",
-			"Intra-refresh + recovery-point-SEI period in frames for use-intra-refresh mode, decoupled from gop-size (which stays the rate-control window). 0 = use gop-size. Smaller = smaller periodic refresh spike + faster mid-stream join; quality plateaus around 16",
-			0, 255, DEFAULT_GDR_REFRESH_PERIOD, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+			"Intra-refresh period in frames, decoupled from gop-size (which stays the rate-control window). 0 = use gop-size. DEPRECATED: use intra-refresh-period, which is the same thing without the 255 frame ceiling",
+			0, 255, DEFAULT_GDR_REFRESH_PERIOD, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_DEPRECATED));
 	g_object_class_install_property(object_class, PROP_ROTATION,
 		g_param_spec_uint("rotation", "Rotation",
 			"Rotate the picture in the encoder pre-processor, in degrees. The PP rotates while reading the input frame (no extra memory pass, chroma-exact). Supported values: 0, 180",
