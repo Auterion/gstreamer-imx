@@ -1569,7 +1569,9 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 				"the same refreshes into fewer pictures: the picture is complete sooner "
 				"after a recovery point, at the same average refresh cost, in exchange "
 				"for frame size jitter (measured +31 ms p99 queueing delay with "
-				"rate-control=1, +56 ms with the built-in one). Clamped down to the period",
+				"rate-control=1, +56 ms with the built-in one). Clamped down to the "
+				"period. Needs rate-control=1: the encoder's own GDR spreads a sweep "
+				"over the whole period and has no dial for this",
 				0, 255, DEFAULT_INTRA_REFRESH_DURATION,
 				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
 			)
@@ -1586,7 +1588,8 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 				"as equal a height as they divide into, so that they cover the picture "
 				"exactly. 0 = a 128 pixel band, which is 2 rows on h.265 and 8 on "
 				"h.264; that measures better than a single CTB row on both test clips "
-				"and with either rate control",
+				"and with either rate control. Needs rate-control=1: the encoder's own "
+				"GDR derives the band height from the period",
 				0, 255, DEFAULT_INTRA_REFRESH_ROWS,
 				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
 			)
@@ -1769,7 +1772,7 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 			0, 180, DEFAULT_ROTATION, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(object_class, PROP_RATE_CONTROL,
 		g_param_spec_uint("rate-control", "Rate control",
-			"Which rate control drives the encoder. 0 = the encoder's built-in one (default; use-hrd, static-scene-ibit-percent, qp-min etc. apply as documented). 1 = new CBR: the built-in picture rate control is switched off and every picture's QP is chosen from a leaky-bucket model instead (bounded by hrd-buffer-size); aims at a bitrate ceiling rather than a quota, so the rate follows scene difficulty without retuning. VC8000E only",
+			"Which rate control drives the encoder. 0 = the encoder's built-in one (default; use-hrd, static-scene-ibit-percent, qp-min etc. apply as documented). 1 = new CBR: the built-in picture rate control is switched off and every picture's QP is chosen from a leaky-bucket model instead (bounded by hrd-buffer-size); aims at a bitrate ceiling rather than a quota, so the rate follows scene difficulty without retuning. This also picks which mechanism produces the intra refresh, because the two cannot both drive it: 0 leaves it to the encoder's own GDR and produces byte-for-byte the stream the unmodified encoder produced, 1 runs the sweep from the plugin - which is what intra-refresh-duration, intra-refresh-rows and request-intra-region act on, and what emits the refresh SEIs. VC8000E only",
 			0, 1, DEFAULT_RATE_CONTROL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	longname = g_strdup_printf("i.MX VPU %s video encoder", codec_details->desc_name);
