@@ -784,6 +784,8 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	ImxVpuApiColorFormat color_format;
 	GstCaps *output_caps;
 	GstVideoCodecState *output_state;
+	ImxVpuApiEncSessionState session_state;
+	gboolean have_session_state = FALSE;
 
 	// TODO: Communicate alignment information from ImxVpuApiEncGlobalInfo to upstream somehow
 
@@ -794,6 +796,15 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 
 	if (imx_vpu_enc->encoder != NULL)
 	{
+		/* This is where a resolution change lands: the encoder is per frame
+		 * size, so a new one has to be opened. The stream itself continues
+		 * though, and two things about it must not restart with the new
+		 * encoder - the rate control's buffer level, which describes the link
+		 * and not the picture size, and the parameter set ids, which a
+		 * decoder uses to tell the resolutions apart. Carry them over. */
+		if (imx_vpu_api_enc_get_session_state(imx_vpu_enc->encoder, &session_state) == IMX_VPU_API_ENC_RETURN_CODE_OK)
+			have_session_state = TRUE;
+
 		imx_vpu_api_enc_close(imx_vpu_enc->encoder);
 		imx_vpu_enc->encoder = NULL;
 	}
@@ -910,6 +921,19 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 		GST_ERROR_OBJECT(imx_vpu_enc, "could not open encoder: %s", imx_vpu_api_enc_return_code_string(enc_ret));
 		ret = FALSE;
 		goto finish;
+	}
+
+
+	/* Continue the stream the encoder that was just closed was producing. */
+	if (have_session_state)
+	{
+		ImxVpuApiEncReturnCodes state_ret = imx_vpu_api_enc_set_session_state(imx_vpu_enc->encoder, &session_state);
+
+		if (state_ret == IMX_VPU_API_ENC_RETURN_CODE_OK)
+			GST_DEBUG_OBJECT(imx_vpu_enc, "continuing the stream of the previous encoder instance");
+		else
+			GST_WARNING_OBJECT(imx_vpu_enc, "could not continue the stream of the previous encoder instance: %s",
+			                   imx_vpu_api_enc_return_code_string(state_ret));
 	}
 
 
