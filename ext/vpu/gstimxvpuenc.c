@@ -80,7 +80,7 @@ enum
 	PROP_QP_MAX_INTRA,
 	PROP_INTRA_REFRESH_PERIOD,
 	PROP_INTRA_REFRESH_DURATION,
-	PROP_INTRA_REFRESH_ROWS,
+	PROP_INTRA_REFRESH_HEIGHT,
 	PROP_SLICE_HEIGHT,
 	PROP_SLICE_COUNT,
 	PROP_USE_ROLLING_SLICES,
@@ -97,7 +97,7 @@ enum
 #define DEFAULT_ALLOW_FRAMESKIPPING      FALSE
 #define DEFAULT_USE_INTRA_REFRESH        FALSE
 #define DEFAULT_INTRA_QP_BIAS			 0
-#define DEFAULT_HRD_BUFFER_SIZE			 1000
+#define DEFAULT_HRD_BUFFER_SIZE			 0
 #define DEFAULT_USE_HRD					 FALSE
 #define DEFAULT_QP_MIN                  0
 #define DEFAULT_QP_MIN_INTRA            0
@@ -109,7 +109,7 @@ enum
 #define DEFAULT_QP_MAX_INTRA            0
 #define DEFAULT_INTRA_REFRESH_PERIOD    0
 #define DEFAULT_INTRA_REFRESH_DURATION  0
-#define DEFAULT_INTRA_REFRESH_ROWS      0
+#define DEFAULT_INTRA_REFRESH_HEIGHT      0
 #define DEFAULT_SLICE_HEIGHT            0
 #define DEFAULT_SLICE_COUNT             0
 #define DEFAULT_USE_ROLLING_SLICES      0
@@ -136,6 +136,7 @@ static gboolean gst_imx_vpu_enc_propose_allocation(GstVideoEncoder *encoder, Gst
 static gboolean gst_imx_vpu_enc_create_dma_buffer_pool(GstImxVpuEnc *imx_vpu_enc);
 static void gst_imx_vpu_enc_free_fb_pool_dmabuffers(GstImxVpuEnc *imx_vpu_enc);
 static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_enc);
+static gboolean gst_imx_vpu_enc_frame_carries_parameter_sets(GstBuffer *buffer, ImxVpuApiCompressionFormat compression_format);
 static void gst_imx_vpu_enc_finalize(GObject *object);
 static void gst_imx_vpu_enc_request_intra_region(GstImxVpuEnc *imx_vpu_enc, guint first_ctb_row, guint num_ctb_rows);
 
@@ -198,7 +199,7 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->qp_max_intra = DEFAULT_QP_MAX_INTRA;
 	imx_vpu_enc->intra_refresh_period = DEFAULT_INTRA_REFRESH_PERIOD;
 	imx_vpu_enc->intra_refresh_duration = DEFAULT_INTRA_REFRESH_DURATION;
-	imx_vpu_enc->intra_refresh_rows = DEFAULT_INTRA_REFRESH_ROWS;
+	imx_vpu_enc->intra_refresh_height = DEFAULT_INTRA_REFRESH_HEIGHT;
 	imx_vpu_enc->slice_height = DEFAULT_SLICE_HEIGHT;
 	imx_vpu_enc->slice_count = DEFAULT_SLICE_COUNT;
 	imx_vpu_enc->use_rolling_slices = DEFAULT_USE_ROLLING_SLICES;
@@ -219,8 +220,7 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->cached_headers = NULL;
 	imx_vpu_enc->cached_headers_size = 0;
 	imx_vpu_enc->output_frame_count = 0;
-	imx_vpu_enc->config_interval = 0;
-	imx_vpu_enc->config_interval_frames = 0;
+	imx_vpu_enc->param_set_interval_frames = 0;
 
 	imx_vpu_enc->fatal_error_cannot_encode = FALSE;
 
@@ -347,9 +347,9 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
-		case PROP_INTRA_REFRESH_ROWS:
+		case PROP_INTRA_REFRESH_HEIGHT:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->intra_refresh_rows = g_value_get_uint(value);
+			imx_vpu_enc->intra_refresh_height = g_value_get_uint(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -371,7 +371,7 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			gst_imx_vpu_enc_warn_deprecated(imx_vpu_enc, 1, imx_vpu_enc->use_rolling_slices != 0,
 			                                "use-rolling-slices",
-			                                "intra-refresh with intra-refresh-rows and slice-count");
+			                                "intra-refresh with intra-refresh-height and slice-count");
 			break;
 
 		case PROP_USE_ROLLING_TILES:
@@ -534,9 +534,9 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
-		case PROP_INTRA_REFRESH_ROWS:
+		case PROP_INTRA_REFRESH_HEIGHT:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->intra_refresh_rows);
+			g_value_set_uint(value, imx_vpu_enc->intra_refresh_height);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -870,7 +870,7 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	open_params->static_scene_ibit_percent = imx_vpu_enc->static_scene_ibit_percent;
 	open_params->intra_refresh_period = imx_vpu_enc->intra_refresh_period;
 	open_params->intra_refresh_duration = imx_vpu_enc->intra_refresh_duration;
-	open_params->intra_refresh_rows = imx_vpu_enc->intra_refresh_rows;
+	open_params->intra_refresh_height = imx_vpu_enc->intra_refresh_height;
 	open_params->intra_refresh_columns = 0;
 	open_params->slice_height = imx_vpu_enc->slice_height;
 	open_params->slice_count = imx_vpu_enc->slice_count;
@@ -899,8 +899,50 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	if (open_params->flags & IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_USE_INTRA_REFRESH)
 		GST_DEBUG_OBJECT(encoder, "intra refresh on: period %u, duration %u, %u CTB row(s) per band",
 		                 open_params->intra_refresh_period, open_params->intra_refresh_duration,
-		                 open_params->intra_refresh_rows);
+		                 open_params->intra_refresh_height);
 
+
+	/* The deprecated rolling modes used to be mutually exclusive, and there
+	 * is no sensible way to honour both at once, so asking for two is still
+	 * refused. This lives here rather than in the h.265 subclass because the
+	 * properties that feed it are on the base class now - the check applied
+	 * to only one of the two codecs for as long as they did not. The unified
+	 * properties deliberately do not conflict with them: an explicit
+	 * intra-refresh-height or slice-count simply wins. */
+	if ((open_params->num_rolling_tiles >= 2) && ((open_params->num_rolling_tiles % 2) != 0))
+	{
+		GST_ERROR_OBJECT(imx_vpu_enc, "use-rolling-tiles=%u is invalid: tile count must be "
+		                 "0 (disabled), 1 (auto/2x2), or an even number (2,4,6,...,16)",
+		                 open_params->num_rolling_tiles);
+		ret = FALSE;
+		goto finish;
+	}
+	if ((open_params->num_rolling_slices != 0) && (open_params->num_rolling_tiles != 0))
+	{
+		GST_ERROR_OBJECT(imx_vpu_enc,
+			"use-rolling-slices and use-rolling-tiles are mutually exclusive");
+		ret = FALSE;
+		goto finish;
+	}
+
+	/* The parameter sets are re-inserted at every GOP boundary, always.
+	 * Precomputed here because gop_size is only known once the caps are in.
+	 *
+	 * A frame cadence rather than the sync point flag, deliberately: under
+	 * intra refresh there is no sync point after the bootstrap IDR, and that
+	 * is exactly the case this exists for - a decoder joining such a stream
+	 * would otherwise never receive the parameter sets at all. In keyframe
+	 * mode the cadence lands on the IDRs, which is the same thing. A frame
+	 * that carries its own parameter sets is skipped below, so nothing is
+	 * ever sent twice. */
+	imx_vpu_enc->param_set_interval_frames = (open_params->gop_size > 0) ? open_params->gop_size : 0;
+	GST_INFO_OBJECT(imx_vpu_enc, "parameter sets re-inserted every %u frame(s)",
+	                imx_vpu_enc->param_set_interval_frames);
+
+	if (open_params->num_rolling_slices != 0)
+		GST_INFO_OBJECT(imx_vpu_enc, "rolling slices: %u (0=disabled, 1=auto/4, 2..16=count)", open_params->num_rolling_slices);
+	if (open_params->num_rolling_tiles != 0)
+		GST_INFO_OBJECT(imx_vpu_enc, "rolling tiles: %u (0=disabled, 1=auto/2x2, 2/4/.../16=tile count)", open_params->num_rolling_tiles);
 
 	/* Let the subclass fill the format specific open params. */
 	if ((klass->set_open_params != NULL) && !(klass->set_open_params(imx_vpu_enc, open_params)))
@@ -1251,6 +1293,73 @@ static void gst_imx_vpu_enc_free_fb_pool_dmabuffers(GstImxVpuEnc *imx_vpu_enc)
 }
 
 
+/* Whether this frame already opens with its parameter sets, ahead of the first
+ * slice. The encoder emits its own at every intra period when its built-in rate
+ * control is driving, and has_header only marks the ones that came out of the
+ * initial header capture, so the bitstream itself is what has to be asked. A
+ * second identical copy would cost bytes and tell a decoder nothing new. */
+static gboolean gst_imx_vpu_enc_frame_carries_parameter_sets(GstBuffer *buffer, ImxVpuApiCompressionFormat compression_format)
+{
+	GstMapInfo map_info;
+	gboolean carries_parameter_sets = FALSE;
+	gsize offset;
+
+	if (!gst_buffer_map(buffer, &map_info, GST_MAP_READ))
+		return FALSE;
+
+	/* Walk the Annex B NALs from the front, and stop at the first slice: any
+	 * parameter set for this picture is ahead of it, while an access unit
+	 * delimiter or an SEI in between is no answer either way. */
+	for (offset = 0; (offset + 4) <= map_info.size; ++offset)
+	{
+		guint8 const *data = map_info.data + offset;
+		guint nal_unit_type;
+
+		if ((data[0] != 0) || (data[1] != 0))
+			continue;
+
+		if (data[2] == 1)
+			data += 3;
+		else if ((data[2] == 0) && (data[3] == 1) && ((offset + 5) <= map_info.size))
+			data += 4;
+		else
+			continue;
+
+		if (compression_format == IMX_VPU_API_COMPRESSION_FORMAT_H265)
+		{
+			nal_unit_type = (data[0] >> 1) & 0x3f;
+
+			/* VPS, SPS, PPS. */
+			if ((nal_unit_type >= 32) && (nal_unit_type <= 34))
+				carries_parameter_sets = TRUE;
+			/* Anything below 32 is a slice segment. */
+			else if (nal_unit_type < 32)
+				break;
+		}
+		else
+		{
+			nal_unit_type = data[0] & 0x1f;
+
+			/* SPS, PPS. */
+			if ((nal_unit_type == 7) || (nal_unit_type == 8))
+				carries_parameter_sets = TRUE;
+			/* 1 to 5 are the slice types. */
+			else if ((nal_unit_type >= 1) && (nal_unit_type <= 5))
+				break;
+		}
+
+		if (carries_parameter_sets)
+			break;
+
+		offset = (data - map_info.data) - 1;
+	}
+
+	gst_buffer_unmap(buffer, &map_info);
+
+	return carries_parameter_sets;
+}
+
+
 static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_enc)
 {
 	GstVideoEncoder *encoder = GST_VIDEO_ENCODER_CAST(imx_vpu_enc);
@@ -1358,11 +1467,12 @@ static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_
 					}
 				}
 
-				if (imx_vpu_enc->config_interval_frames > 0
+				if (imx_vpu_enc->param_set_interval_frames > 0
 				    && imx_vpu_enc->cached_headers != NULL
 				    && !encoded_frame.has_header
 				    && imx_vpu_enc->output_frame_count > 0
-				    && (imx_vpu_enc->output_frame_count % imx_vpu_enc->config_interval_frames) == 0)
+				    && (imx_vpu_enc->output_frame_count % imx_vpu_enc->param_set_interval_frames) == 0
+				    && !gst_imx_vpu_enc_frame_carries_parameter_sets(output_buffer, GST_IMX_VPU_GET_ELEMENT_COMPRESSION_FORMAT(imx_vpu_enc)))
 				{
 					GstBuffer *header_buf = gst_buffer_new_wrapped(g_memdup2(imx_vpu_enc->cached_headers, imx_vpu_enc->cached_headers_size), imx_vpu_enc->cached_headers_size);
 					output_buffer = gst_buffer_append(header_buf, output_buffer);
@@ -1602,19 +1712,20 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 		);
 		g_object_class_install_property(
 			object_class,
-			PROP_INTRA_REFRESH_ROWS,
+			PROP_INTRA_REFRESH_HEIGHT,
 			g_param_spec_uint(
-				"intra-refresh-rows",
+				"intra-refresh-height",
 				"Intra refresh band height",
 				"Target height of one refresh band, in the encoder's own coding unit "
-				"rows: 64 pixels for h.265, 16 for h.264. A target, not an exact "
+				"rows - a row being 64 pixels on h.265 and 16 on h.264. 0 = the "
+				"default, which is 2 rows on h.265 and 8 rows on h.264, the two "
+				"covering the same share of the picture. A target, not an exact "
 				"height - the sweep is split into ceil(rows-in-picture / this) bands of "
 				"as equal a height as they divide into, so that they cover the picture "
-				"exactly. 0 = a 128 pixel band, which is 2 rows on h.265 and 8 on "
-				"h.264; that measures better than a single CTB row on both test clips "
-				"and with either rate control. Needs rate-control=1: the encoder's own "
+				"exactly. The default measures better than a single row on both test "
+				"clips and with either rate control. Needs rate-control=1: the encoder's own "
 				"GDR derives the band height from the period",
-				0, 255, DEFAULT_INTRA_REFRESH_ROWS,
+				0, 255, DEFAULT_INTRA_REFRESH_HEIGHT,
 				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
 			)
 		);
@@ -1671,7 +1782,7 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 				"Rolling intra slice refresh",
 				"Rolling intra refresh by full width slice band. 0 = off, 1 = automatic "
 				"(4 slices), 2..16 = slice count. DEPRECATED: use intra-refresh with "
-				"intra-refresh-rows and slice-count",
+				"intra-refresh-height and slice-count",
 				0, 16, DEFAULT_USE_ROLLING_SLICES,
 				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_DEPRECATED
 			)
@@ -1747,8 +1858,17 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 		PROP_HRD_BUFFER_SIZE,
 		g_param_spec_uint(
 			"hrd-buffer-size",
-			"HRD CBP buffer size",
-			"Size of Coded Picture Buffer in HRD (kbits)",
+			"HRD buffer size",
+			"Coded data allowed in flight before the link has drained it, in kbits - a CPB size. "
+			"0 = one second of bitrate, which is what the two are numerically equal to since one "
+			"is kbits and the other kbps. At rate-control=1 this is the HRD buffer the rate "
+			"control aims at, and it is the latency dial of that mode: smaller tracks the target "
+			"harder and jitters less, larger absorbs more of a motion onset. At rate-control=0 it "
+			"bounds the hardware HRD model's CPB, and only matters with use-hrd. The setting is a "
+			"latency bound and is obeyed as one: at rate-control=1 only a buffer below two and a "
+			"half frame budgets, bitrate / fps * 2.5, is clamped up, and the hardware HRD keeps its "
+			"own floor of five because it freezes below about four. A small buffer can still leave "
+			"the rate short of the target on content with no still passages to refill it",
 			0, G_MAXUINT, DEFAULT_HRD_BUFFER_SIZE,
 			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
 		)
@@ -1796,7 +1916,15 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 			0, 180, DEFAULT_ROTATION, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(object_class, PROP_RATE_CONTROL,
 		g_param_spec_uint("rate-control", "Rate control",
-			"Which rate control drives the encoder. 0 = the encoder's built-in one (default; use-hrd, static-scene-ibit-percent, qp-min etc. apply as documented). 1 = new CBR: the built-in picture rate control is switched off and every picture's QP is chosen from a leaky-bucket model instead (bounded by hrd-buffer-size); aims at a bitrate ceiling rather than a quota, so the rate follows scene difficulty without retuning. This also picks which mechanism produces the intra refresh, because the two cannot both drive it: 0 leaves it to the encoder's own GDR and produces byte-for-byte the stream the unmodified encoder produced, 1 runs the sweep from the plugin - which is what intra-refresh-duration, intra-refresh-rows and request-intra-region act on, and what emits the refresh SEIs. VC8000E only",
+			"Which rate control drives the encoder, and with it the intra refresh. "
+			"0 = the encoder's own: use-hrd, qp-min and the rest apply as documented, "
+			"the refresh is the encoder's GDR, and the output is byte-for-byte what the "
+			"unmodified encoder produced. "
+			"1 = CBR from the library: each picture's QP is picked to keep the HRD buffer "
+			"within hrd-buffer-size, so the rate follows scene difficulty without retuning "
+			"and the HRD holds at all times (use-hrd is not consulted). The sweep then runs "
+			"in the library, which is what intra-refresh-duration, intra-refresh-height and "
+			"request-intra-region act on, and what emits the refresh SEIs",
 			0, 1, DEFAULT_RATE_CONTROL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	longname = g_strdup_printf("i.MX VPU %s video encoder", codec_details->desc_name);

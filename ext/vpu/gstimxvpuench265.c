@@ -25,13 +25,11 @@
 enum
 {
 	PROP_0 = GST_IMX_VPU_ENC_BASE_PROP_VALUE,
-	PROP_ENABLE_AUD,
-	PROP_CONFIG_INTERVAL
+	PROP_ENABLE_AUD
 };
 
 
 #define DEFAULT_ENABLE_AUD              TRUE
-#define DEFAULT_CONFIG_INTERVAL         (-1)
 
 
 GST_DEBUG_CATEGORY_STATIC(imx_vpu_enc_h265_debug);
@@ -43,7 +41,6 @@ struct _GstImxVpuEncH265
 	GstImxVpuEnc parent;
 
 	gboolean enable_aud;
-	gint config_interval;
 };
 
 
@@ -92,25 +89,6 @@ static void gst_imx_vpu_enc_h265_class_init(GstImxVpuEncH265Class *klass)
 			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
 		)
 	);
-
-
-
-	g_object_class_install_property(
-		object_class,
-		PROP_CONFIG_INTERVAL,
-		g_param_spec_int(
-			"config-interval",
-			"VPS/SPS/PPS insertion interval",
-			"Interval for re-sending VPS/SPS/PPS parameter sets: "
-			"-1 = at the start of every GOP (every gop-size frames), "
-			"0 = disabled, "
-			"N > 0 = every N seconds",
-			-1, G_MAXINT,
-			DEFAULT_CONFIG_INTERVAL,
-			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
-		)
-	);
-
 }
 
 
@@ -118,7 +96,6 @@ static void gst_imx_vpu_enc_h265_init(GstImxVpuEncH265 *imx_vpu_enc_h265)
 {
 	gst_imx_vpu_enc_common_init(GST_IMX_VPU_ENC_CAST(imx_vpu_enc_h265));
 	imx_vpu_enc_h265->enable_aud = DEFAULT_ENABLE_AUD;
-	imx_vpu_enc_h265->config_interval = DEFAULT_CONFIG_INTERVAL;
 }
 
 
@@ -131,12 +108,6 @@ static void gst_imx_vpu_enc_h265_set_encoder_property(GObject *object, guint pro
 		case PROP_ENABLE_AUD:
 			GST_OBJECT_LOCK(imx_vpu_enc_h265);
 			imx_vpu_enc_h265->enable_aud = g_value_get_boolean(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
-			break;
-
-		case PROP_CONFIG_INTERVAL:
-			GST_OBJECT_LOCK(imx_vpu_enc_h265);
-			imx_vpu_enc_h265->config_interval = g_value_get_int(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
 			break;
 
@@ -155,12 +126,6 @@ static void gst_imx_vpu_enc_h265_get_encoder_property(GObject *object, guint pro
 		case PROP_ENABLE_AUD:
 			GST_OBJECT_LOCK(imx_vpu_enc_h265);
 			g_value_set_boolean(value, imx_vpu_enc_h265->enable_aud);
-			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
-			break;
-
-		case PROP_CONFIG_INTERVAL:
-			GST_OBJECT_LOCK(imx_vpu_enc_h265);
-			g_value_set_int(value, imx_vpu_enc_h265->config_interval);
 			GST_OBJECT_UNLOCK(imx_vpu_enc_h265);
 			break;
 
@@ -236,54 +201,9 @@ gboolean gst_imx_vpu_enc_h265_set_open_params(GstImxVpuEnc *imx_vpu_enc, ImxVpuA
 
 	GST_OBJECT_LOCK(imx_vpu_enc);
 	h265_params->enable_access_unit_delimiters = GST_IMX_VPU_ENC_H265_CAST(imx_vpu_enc)->enable_aud;
-	gint config_interval = GST_IMX_VPU_ENC_H265_CAST(imx_vpu_enc)->config_interval;
 	GST_OBJECT_UNLOCK(imx_vpu_enc);
 
-	/* use-rolling-slices, use-rolling-tiles and roll-size moved to the base
-	 * class, because intra refresh is not H.265 only any more; the library
-	 * maps all three onto the unified fields. What is still worth refusing
-	 * is asking for two of the deprecated modes at once, since they used to
-	 * be mutually exclusive and there is no sensible way to honour both.
-	 * The unified properties deliberately do not conflict with them: an
-	 * explicit intra-refresh-rows or slice-count simply wins. */
-	if ((open_params->num_rolling_tiles >= 2) && ((open_params->num_rolling_tiles % 2) != 0))
-	{
-		GST_ERROR_OBJECT(imx_vpu_enc, "use-rolling-tiles=%u is invalid: tile count must be "
-		                 "0 (disabled), 1 (auto/2x2), or an even number (2,4,6,...,16)",
-		                 open_params->num_rolling_tiles);
-		ret = FALSE;
-		goto finish;
-	}
-	if ((open_params->num_rolling_slices != 0) && (open_params->num_rolling_tiles != 0))
-	{
-		GST_ERROR_OBJECT(imx_vpu_enc,
-			"use-rolling-slices and use-rolling-tiles are mutually exclusive");
-		ret = FALSE;
-		goto finish;
-	}
-
-	/* Precompute config-interval in frames and store in base encoder. */
-	imx_vpu_enc->config_interval = config_interval;
-	if (config_interval == -1)
-	{
-		imx_vpu_enc->config_interval_frames = open_params->gop_size > 0 ? open_params->gop_size : 0;
-	}
-	else if (config_interval > 0)
-	{
-		guint fps = (open_params->frame_rate_denominator > 0)
-			? (open_params->frame_rate_numerator + open_params->frame_rate_denominator - 1) / open_params->frame_rate_denominator
-			: 30;
-		imx_vpu_enc->config_interval_frames = fps * config_interval;
-	}
-	else
-	{
-		imx_vpu_enc->config_interval_frames = 0;
-	}
-
 	GST_INFO_OBJECT(imx_vpu_enc, "access unit delimiters enabled: %d", h265_params->enable_access_unit_delimiters);
-	GST_INFO_OBJECT(imx_vpu_enc, "rolling slices: %u (0=disabled, 1=auto/4, 2..16=count)", open_params->num_rolling_slices);
-	GST_INFO_OBJECT(imx_vpu_enc, "rolling tiles: %u (0=disabled, 1=auto/2x2, 2/4/.../16=tile count)", open_params->num_rolling_tiles);
-	GST_INFO_OBJECT(imx_vpu_enc, "config-interval: %d (every %u frames)", config_interval, imx_vpu_enc->config_interval_frames);
 
 
 finish:

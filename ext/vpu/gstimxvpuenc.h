@@ -129,7 +129,7 @@ struct _GstImxVpuEnc
 	gboolean intra_refresh;
 	guint intra_refresh_period;
 	guint intra_refresh_duration;
-	guint intra_refresh_rows;
+	guint intra_refresh_height;
 	guint slice_height;
 	guint slice_count;
 
@@ -148,16 +148,12 @@ struct _GstImxVpuEnc
 	gsize cached_headers_size;
 
 	/* Monotonically increasing count of encoded output frames.
-	 * Used to detect config-interval boundaries. */
+	 * Used to detect parameter set re-insertion boundaries. */
 	guint64 output_frame_count;
 
-	/* Header insertion interval set by subclass (H.265):
-	 *   -1 = every gop-size frames (default)
-	 *    0 = disabled
-	 *   >0 = every N seconds (converted to frames using fps)
-	 * Precomputed as config_interval_frames during set_format. */
-	gint config_interval;
-	guint config_interval_frames;
+	/* How often the cached parameter sets are re-inserted, in frames. Set to
+	 * gop_size during set_format; 0 only when there is no GOP to speak of. */
+	guint param_set_interval_frames;
 
 	GMutex intra_region_mutex;
 	guint intra_region_q_first[GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE];
