@@ -136,7 +136,6 @@ static gboolean gst_imx_vpu_enc_propose_allocation(GstVideoEncoder *encoder, Gst
 static gboolean gst_imx_vpu_enc_create_dma_buffer_pool(GstImxVpuEnc *imx_vpu_enc);
 static void gst_imx_vpu_enc_free_fb_pool_dmabuffers(GstImxVpuEnc *imx_vpu_enc);
 static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_enc);
-static gboolean gst_imx_vpu_enc_frame_carries_parameter_sets(GstBuffer *buffer, ImxVpuApiCompressionFormat compression_format);
 static void gst_imx_vpu_enc_finalize(GObject *object);
 static void gst_imx_vpu_enc_request_intra_region(GstImxVpuEnc *imx_vpu_enc, guint first_ctb_row, guint num_ctb_rows);
 
@@ -217,10 +216,7 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->uploaded_buffers_table = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, (GDestroyNotify)gst_buffer_unref);
 	imx_vpu_enc->fb_pool_buffers = NULL;
 
-	imx_vpu_enc->cached_headers = NULL;
-	imx_vpu_enc->cached_headers_size = 0;
 	imx_vpu_enc->output_frame_count = 0;
-	imx_vpu_enc->param_set_interval_frames = 0;
 
 	imx_vpu_enc->fatal_error_cannot_encode = FALSE;
 
@@ -760,9 +756,6 @@ static gboolean gst_imx_vpu_enc_stop(GstVideoEncoder *encoder)
 		imx_vpu_enc->default_dma_buf_allocator = NULL;
 	}
 
-	g_free(imx_vpu_enc->cached_headers);
-	imx_vpu_enc->cached_headers = NULL;
-	imx_vpu_enc->cached_headers_size = 0;
 	imx_vpu_enc->output_frame_count = 0;
 
 	GST_INFO_OBJECT(imx_vpu_enc, "i.MX VPU %s encoder stopped", codec_details->desc_name);
@@ -819,9 +812,6 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 		imx_vpu_enc->dma_buffer_pool = NULL;
 	}
 
-	g_free(imx_vpu_enc->cached_headers);
-	imx_vpu_enc->cached_headers = NULL;
-	imx_vpu_enc->cached_headers_size = 0;
 	imx_vpu_enc->output_frame_count = 0;
 
 
@@ -925,19 +915,18 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 		goto finish;
 	}
 
-	/* The parameter sets are re-inserted at every GOP boundary, always.
-	 * Precomputed here because gop_size is only known once the caps are in.
+	/* Periodic re-insertion of the parameter sets used to happen here, by
+	 * caching the first frame's VPS/SPS/PPS and appending a copy to the
+	 * output buffer every gop_size frames. It belongs in libimxvpuapi and is
+	 * done there now.
 	 *
-	 * A frame cadence rather than the sync point flag, deliberately: under
-	 * intra refresh there is no sync point after the bootstrap IDR, and that
-	 * is exactly the case this exists for - a decoder joining such a stream
-	 * would otherwise never receive the parameter sets at all. In keyframe
-	 * mode the cadence lands on the IDRs, which is the same thing. A frame
-	 * that carries its own parameter sets is skipped below, so nothing is
-	 * ever sent twice. */
-	imx_vpu_enc->param_set_interval_frames = (open_params->gop_size > 0) ? open_params->gop_size : 0;
-	GST_INFO_OBJECT(imx_vpu_enc, "parameter sets re-inserted every %u frame(s)",
-	                imx_vpu_enc->param_set_interval_frames);
+	 * The reason is the rate control. Appending them here happened after
+	 * imx_vpu_api_enc_get_encoded_frame_ext() had returned and the frame's
+	 * bits had been accounted, so the encoder's leaky bucket was never
+	 * charged for them - 89 bytes onto the link per GOP that it could not
+	 * see, which was enough to carry a picture past a 150 kbit buffer. The
+	 * library emits them itself now, at the same cadence and in the same
+	 * place in the stream, and charges them. */
 
 	if (open_params->num_rolling_slices != 0)
 		GST_INFO_OBJECT(imx_vpu_enc, "rolling slices: %u (0=disabled, 1=auto/4, 2..16=count)", open_params->num_rolling_slices);
@@ -1298,68 +1287,6 @@ static void gst_imx_vpu_enc_free_fb_pool_dmabuffers(GstImxVpuEnc *imx_vpu_enc)
  * control is driving, and has_header only marks the ones that came out of the
  * initial header capture, so the bitstream itself is what has to be asked. A
  * second identical copy would cost bytes and tell a decoder nothing new. */
-static gboolean gst_imx_vpu_enc_frame_carries_parameter_sets(GstBuffer *buffer, ImxVpuApiCompressionFormat compression_format)
-{
-	GstMapInfo map_info;
-	gboolean carries_parameter_sets = FALSE;
-	gsize offset;
-
-	if (!gst_buffer_map(buffer, &map_info, GST_MAP_READ))
-		return FALSE;
-
-	/* Walk the Annex B NALs from the front, and stop at the first slice: any
-	 * parameter set for this picture is ahead of it, while an access unit
-	 * delimiter or an SEI in between is no answer either way. */
-	for (offset = 0; (offset + 4) <= map_info.size; ++offset)
-	{
-		guint8 const *data = map_info.data + offset;
-		guint nal_unit_type;
-
-		if ((data[0] != 0) || (data[1] != 0))
-			continue;
-
-		if (data[2] == 1)
-			data += 3;
-		else if ((data[2] == 0) && (data[3] == 1) && ((offset + 5) <= map_info.size))
-			data += 4;
-		else
-			continue;
-
-		if (compression_format == IMX_VPU_API_COMPRESSION_FORMAT_H265)
-		{
-			nal_unit_type = (data[0] >> 1) & 0x3f;
-
-			/* VPS, SPS, PPS. */
-			if ((nal_unit_type >= 32) && (nal_unit_type <= 34))
-				carries_parameter_sets = TRUE;
-			/* Anything below 32 is a slice segment. */
-			else if (nal_unit_type < 32)
-				break;
-		}
-		else
-		{
-			nal_unit_type = data[0] & 0x1f;
-
-			/* SPS, PPS. */
-			if ((nal_unit_type == 7) || (nal_unit_type == 8))
-				carries_parameter_sets = TRUE;
-			/* 1 to 5 are the slice types. */
-			else if ((nal_unit_type >= 1) && (nal_unit_type <= 5))
-				break;
-		}
-
-		if (carries_parameter_sets)
-			break;
-
-		offset = (data - map_info.data) - 1;
-	}
-
-	gst_buffer_unmap(buffer, &map_info);
-
-	return carries_parameter_sets;
-}
-
-
 static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_enc)
 {
 	GstVideoEncoder *encoder = GST_VIDEO_ENCODER_CAST(imx_vpu_enc);
@@ -1453,31 +1380,6 @@ static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_
 				} else {
 					flow_ret = GST_FLOW_OK;
 					do_loop = FALSE;
-				}
-
-				if (encoded_frame.has_header && encoded_frame.header_size > 0 && imx_vpu_enc->cached_headers == NULL)
-				{
-					if (gst_buffer_map(output_buffer, &map_info, GST_MAP_READ))
-					{
-						imx_vpu_enc->cached_headers = g_malloc(encoded_frame.header_size);
-						memcpy(imx_vpu_enc->cached_headers, map_info.data, encoded_frame.header_size);
-						imx_vpu_enc->cached_headers_size = encoded_frame.header_size;
-						gst_buffer_unmap(output_buffer, &map_info);
-						GST_INFO_OBJECT(imx_vpu_enc, "cached %" G_GSIZE_FORMAT " bytes of parameter set headers", imx_vpu_enc->cached_headers_size);
-					}
-				}
-
-				if (imx_vpu_enc->param_set_interval_frames > 0
-				    && imx_vpu_enc->cached_headers != NULL
-				    && !encoded_frame.has_header
-				    && imx_vpu_enc->output_frame_count > 0
-				    && (imx_vpu_enc->output_frame_count % imx_vpu_enc->param_set_interval_frames) == 0
-				    && !gst_imx_vpu_enc_frame_carries_parameter_sets(output_buffer, GST_IMX_VPU_GET_ELEMENT_COMPRESSION_FORMAT(imx_vpu_enc)))
-				{
-					GstBuffer *header_buf = gst_buffer_new_wrapped(g_memdup2(imx_vpu_enc->cached_headers, imx_vpu_enc->cached_headers_size), imx_vpu_enc->cached_headers_size);
-					output_buffer = gst_buffer_append(header_buf, output_buffer);
-					GST_LOG_OBJECT(imx_vpu_enc, "prepended %" G_GSIZE_FORMAT " bytes of parameter sets at frame %" G_GUINT64_FORMAT,
-						imx_vpu_enc->cached_headers_size, imx_vpu_enc->output_frame_count);
 				}
 
 				imx_vpu_enc->output_frame_count++;

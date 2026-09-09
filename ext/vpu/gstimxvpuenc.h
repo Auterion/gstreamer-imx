@@ -142,18 +142,9 @@ struct _GstImxVpuEnc
 	guint use_rolling_tiles;
 	guint roll_size;
 
-	/* Cached VPS/SPS/PPS parameter sets for periodic re-insertion.
-	 * Captured from the first encoded frame's header data. */
-	guint8 *cached_headers;
-	gsize cached_headers_size;
-
 	/* Monotonically increasing count of encoded output frames.
 	 * Used to detect parameter set re-insertion boundaries. */
 	guint64 output_frame_count;
-
-	/* How often the cached parameter sets are re-inserted, in frames. Set to
-	 * gop_size during set_format; 0 only when there is no GOP to speak of. */
-	guint param_set_interval_frames;
 
 	GMutex intra_region_mutex;
 	guint intra_region_q_first[GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE];
