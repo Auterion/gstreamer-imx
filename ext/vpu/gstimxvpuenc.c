@@ -73,7 +73,8 @@ enum
 	PROP_QP_MIN,
 	PROP_QP_MIN_INTRA,
 	PROP_STATIC_SCENE_IBIT_PERCENT,
-	PROP_GDR_REFRESH_PERIOD
+	PROP_GDR_REFRESH_PERIOD,
+	PROP_ROTATION
 };
 
 
@@ -91,6 +92,7 @@ enum
 #define DEFAULT_QP_MIN_INTRA            0
 #define DEFAULT_STATIC_SCENE_IBIT_PERCENT 0
 #define DEFAULT_GDR_REFRESH_PERIOD      0
+#define DEFAULT_ROTATION                0
 
 
 G_DEFINE_ABSTRACT_TYPE(GstImxVpuEnc, gst_imx_vpu_enc, GST_TYPE_VIDEO_ENCODER)
@@ -168,6 +170,7 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 	imx_vpu_enc->qp_min_intra = DEFAULT_QP_MIN_INTRA;
 	imx_vpu_enc->static_scene_ibit_percent = DEFAULT_STATIC_SCENE_IBIT_PERCENT;
 	imx_vpu_enc->gdr_refresh_period = DEFAULT_GDR_REFRESH_PERIOD;
+	imx_vpu_enc->rotation = DEFAULT_ROTATION;
 
 	imx_vpu_enc->stream_buffer = NULL;
 	imx_vpu_enc->encoder = NULL;
@@ -337,6 +340,12 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
+		case PROP_ROTATION:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			imx_vpu_enc->rotation = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
 		default:
 			if (klass->set_encoder_property != NULL)
 				klass->set_encoder_property(object, prop_id, value, pspec);
@@ -441,6 +450,12 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 		case PROP_GDR_REFRESH_PERIOD:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			g_value_set_uint(value, imx_vpu_enc->gdr_refresh_period);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
+		case PROP_ROTATION:
+			GST_OBJECT_LOCK(imx_vpu_enc);
+			g_value_set_uint(value, imx_vpu_enc->rotation);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -570,6 +585,7 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	GstImxVpuEnc *imx_vpu_enc = GST_IMX_VPU_ENC(encoder);
 	GstImxVpuEncClass *klass = GST_IMX_VPU_ENC_CLASS(G_OBJECT_GET_CLASS(encoder));
 	gboolean ret = TRUE;
+	guint rotation;
 	GstVideoFormat video_format;
 	ImxVpuApiEncOpenParams *open_params = &(imx_vpu_enc->open_params);
 	ImxVpuApiCompressionFormat compression_format = GST_IMX_VPU_GET_ELEMENT_COMPRESSION_FORMAT(encoder);
@@ -646,7 +662,16 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	open_params->qp_min_intra = imx_vpu_enc->qp_min_intra;
 	open_params->static_scene_ibit_percent = imx_vpu_enc->static_scene_ibit_percent;
 	open_params->gdr_refresh_period = imx_vpu_enc->gdr_refresh_period;
+	open_params->rotation_180 = (imx_vpu_enc->rotation == 180);
+	rotation = imx_vpu_enc->rotation;
 	GST_OBJECT_UNLOCK(imx_vpu_enc);
+
+	if ((rotation != 0) && (rotation != 180))
+	{
+		GST_ERROR_OBJECT(imx_vpu_enc, "unsupported rotation %u; the encoder pre-processor supports 0 and 180 only", rotation);
+		ret = FALSE;
+		goto finish;
+	}
 
 	GST_DEBUG_OBJECT(encoder, "setting bitrate to %u kbps and GOP size to %u", open_params->bitrate, open_params->gop_size);
 	GST_DEBUG_OBJECT(encoder, "setting min intra refresh macroblock count to %u", open_params->min_intra_refresh_mb_count);
@@ -1387,6 +1412,10 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 		g_param_spec_uint("gdr-refresh-period", "GDR refresh period",
 			"Intra-refresh + recovery-point-SEI period in frames for use-intra-refresh mode, decoupled from gop-size (which stays the rate-control window). 0 = use gop-size. Smaller = smaller periodic refresh spike + faster mid-stream join; quality plateaus around 16",
 			0, 255, DEFAULT_GDR_REFRESH_PERIOD, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(object_class, PROP_ROTATION,
+		g_param_spec_uint("rotation", "Rotation",
+			"Rotate the picture in the encoder pre-processor, in degrees. The PP rotates while reading the input frame (no extra memory pass, chroma-exact). Supported values: 0, 180",
+			0, 180, DEFAULT_ROTATION, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	longname = g_strdup_printf("i.MX VPU %s video encoder", codec_details->desc_name);
 	classification = g_strdup("Codec/Encoder/Video/Hardware");
