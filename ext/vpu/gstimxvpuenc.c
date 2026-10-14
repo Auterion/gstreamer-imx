@@ -74,7 +74,9 @@ enum
 	PROP_QP_MIN_INTRA,
 	PROP_STATIC_SCENE_IBIT_PERCENT,
 	PROP_GDR_REFRESH_PERIOD,
+#if !defined(IMX8MM)
 	PROP_ROTATION,
+#endif
 	PROP_RATE_CONTROL,
 	PROP_QP_MAX,
 	PROP_QP_MAX_INTRA,
@@ -450,11 +452,13 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			                                "gdr-refresh-period", "intra-refresh-period");
 			break;
 
+#if !defined(IMX8MM)
 		case PROP_ROTATION:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			imx_vpu_enc->rotation = g_value_get_uint(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
+#endif
 
 		case PROP_RATE_CONTROL:
 			GST_OBJECT_LOCK(imx_vpu_enc);
@@ -629,11 +633,13 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
+#if !defined(IMX8MM)
 		case PROP_ROTATION:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			g_value_set_uint(value, imx_vpu_enc->rotation);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
+#endif
 
 		case PROP_RATE_CONTROL:
 			GST_OBJECT_LOCK(imx_vpu_enc);
@@ -1818,10 +1824,12 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 		g_param_spec_uint("gdr-refresh-period", "GDR refresh period",
 			"Intra-refresh period in frames, decoupled from gop-size (which stays the rate-control window). 0 = use gop-size. DEPRECATED: use intra-refresh-period, which is the same thing without the 255 frame ceiling",
 			0, 255, DEFAULT_GDR_REFRESH_PERIOD, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_DEPRECATED));
+#if !defined(IMX8MM)
 	g_object_class_install_property(object_class, PROP_ROTATION,
 		g_param_spec_uint("rotation", "Rotation",
 			"Rotate the picture in the encoder pre-processor, in degrees. The PP rotates while reading the input frame (no extra memory pass, chroma-exact). Supported values: 0, 180",
 			0, 180, DEFAULT_ROTATION, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+#endif
 	g_object_class_install_property(object_class, PROP_RATE_CONTROL,
 		g_param_spec_uint("rate-control", "Rate control",
 			"Which rate control drives the encoder, and with it the intra refresh. "
