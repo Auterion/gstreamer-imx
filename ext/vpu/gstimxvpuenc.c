@@ -453,6 +453,9 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 		case PROP_ROTATION:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			imx_vpu_enc->rotation = g_value_get_uint(value);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
 		case PROP_RATE_CONTROL:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			imx_vpu_enc->rate_control = g_value_get_uint(value);
@@ -629,6 +632,9 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 		case PROP_ROTATION:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			g_value_set_uint(value, imx_vpu_enc->rotation);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			break;
+
 		case PROP_RATE_CONTROL:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			g_value_set_uint(value, imx_vpu_enc->rate_control);
