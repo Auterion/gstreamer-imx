@@ -140,6 +140,43 @@ static void gst_imx_vpu_enc_free_fb_pool_dmabuffers(GstImxVpuEnc *imx_vpu_enc);
 static GstFlowReturn gst_imx_vpu_enc_encode_queued_frames(GstImxVpuEnc *imx_vpu_enc);
 static void gst_imx_vpu_enc_finalize(GObject *object);
 static void gst_imx_vpu_enc_request_intra_region(GstImxVpuEnc *imx_vpu_enc, guint first_ctb_row, guint num_ctb_rows);
+static gboolean gst_imx_vpu_enc_reconfigure(GstImxVpuEnc *imx_vpu_enc, GstStructure const *settings);
+static void gst_imx_vpu_enc_apply_live_settings(GstImxVpuEnc *imx_vpu_enc);
+
+
+/* The properties that can change while the encoder runs, and the
+ * libimxvpuapi reconfiguration group each one belongs to. Everything else is
+ * read when the encoder opens and only takes effect at the next one. */
+typedef struct
+{
+	guint prop_id;
+	gchar const *name;
+	guint32 group;
+	gsize offset;
+}
+GstImxVpuEncLiveProperty;
+
+static GstImxVpuEncLiveProperty const live_properties[] =
+{
+	{ PROP_BITRATE,                "bitrate",                IMX_VPU_API_ENC_RECONFIG_BITRATE,       G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, bitrate) },
+	{ PROP_HRD_BUFFER_SIZE,        "hrd-buffer-size",        IMX_VPU_API_ENC_RECONFIG_HRD_BUFFER,    G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, hrd_buffer_size) },
+	{ PROP_QP_MIN,                 "qp-min",                 IMX_VPU_API_ENC_RECONFIG_QP_RANGE,      G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, qp_min) },
+	{ PROP_QP_MAX,                 "qp-max",                 IMX_VPU_API_ENC_RECONFIG_QP_RANGE,      G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, qp_max) },
+	{ PROP_QP_MIN_INTRA,           "qp-min-intra",           IMX_VPU_API_ENC_RECONFIG_QP_RANGE,      G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, qp_min_intra) },
+	{ PROP_QP_MAX_INTRA,           "qp-max-intra",           IMX_VPU_API_ENC_RECONFIG_QP_RANGE,      G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, qp_max_intra) },
+	{ PROP_INTRA_REFRESH_PERIOD,   "intra-refresh-period",   IMX_VPU_API_ENC_RECONFIG_INTRA_REFRESH, G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, intra_refresh_period) },
+	{ PROP_INTRA_REFRESH_DURATION, "intra-refresh-duration", IMX_VPU_API_ENC_RECONFIG_INTRA_REFRESH, G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, intra_refresh_duration) },
+	{ PROP_INTRA_REFRESH_HEIGHT,   "intra-refresh-height",   IMX_VPU_API_ENC_RECONFIG_INTRA_REFRESH, G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, intra_refresh_height) },
+	{ PROP_SLICE_HEIGHT,           "slice-height",           IMX_VPU_API_ENC_RECONFIG_SLICE,         G_STRUCT_OFFSET(GstImxVpuEncLiveSettings, slice_height) },
+};
+
+#define NUM_LIVE_PROPERTIES G_N_ELEMENTS(live_properties)
+#define LIVE_FIELD(settings, live_prop) (*(guint *)((guint8 *)(settings) + (live_prop)->offset))
+
+/* The live settings by name, for the error messages. */
+#define LIVE_PROPERTY_NAMES \
+	"bitrate, hrd-buffer-size, qp-min, qp-max, qp-min-intra, qp-max-intra, " \
+	"intra-refresh-period, intra-refresh-duration, intra-refresh-height, slice-height"
 
 
 static void gst_imx_vpu_enc_class_init(GstImxVpuEncClass *klass)
@@ -168,6 +205,23 @@ static void gst_imx_vpu_enc_class_init(GstImxVpuEncClass *klass)
 		G_TYPE_NONE, 2, G_TYPE_UINT, G_TYPE_UINT
 	);
 
+	/* Change several live settings at once, so that no picture is coded with
+	 * only some of them changed - a profile switch, for instance. The field
+	 * names are the property names, and the properties are updated too, so
+	 * reading them back tells the truth. Returns FALSE, having changed
+	 * nothing, if any field is not a live setting or not a valid value for
+	 * it. The caller keeps ownership of the structure. */
+	klass->reconfigure = gst_imx_vpu_enc_reconfigure;
+
+	g_signal_new(
+		"reconfigure",
+		G_TYPE_FROM_CLASS(klass),
+		G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
+		G_STRUCT_OFFSET(GstImxVpuEncClass, reconfigure),
+		NULL, NULL, NULL,
+		G_TYPE_BOOLEAN, 1, GST_TYPE_STRUCTURE
+	);
+
 	video_encoder_class->start              = GST_DEBUG_FUNCPTR(gst_imx_vpu_enc_start);
 	video_encoder_class->stop               = GST_DEBUG_FUNCPTR(gst_imx_vpu_enc_stop);
 	video_encoder_class->set_format         = GST_DEBUG_FUNCPTR(gst_imx_vpu_enc_set_format);
@@ -182,33 +236,38 @@ static void gst_imx_vpu_enc_init(GstImxVpuEnc *imx_vpu_enc)
 {
 	imx_vpu_enc->gop_size = DEFAULT_GOP_SIZE;
 	imx_vpu_enc->closed_gop_interval = DEFAULT_CLOSED_GOP_INTERVAL;
-	imx_vpu_enc->bitrate = DEFAULT_BITRATE;
+	imx_vpu_enc->live.bitrate = DEFAULT_BITRATE;
 	imx_vpu_enc->intra_refresh = DEFAULT_INTRA_REFRESH;
 	imx_vpu_enc->fixed_intra_quantization = DEFAULT_FIXED_INTRA_QUANTIZATION;
 	imx_vpu_enc->allow_frameskipping = DEFAULT_ALLOW_FRAMESKIPPING;
 	imx_vpu_enc->use_intra_refresh = DEFAULT_USE_INTRA_REFRESH;
 	imx_vpu_enc->intra_qp_bias = DEFAULT_INTRA_QP_BIAS;
-	imx_vpu_enc->hrd_buffer_size = DEFAULT_HRD_BUFFER_SIZE;
+	imx_vpu_enc->live.hrd_buffer_size = DEFAULT_HRD_BUFFER_SIZE;
 	imx_vpu_enc->use_hrd = DEFAULT_USE_HRD;
-	imx_vpu_enc->qp_min = DEFAULT_QP_MIN;
-	imx_vpu_enc->qp_min_intra = DEFAULT_QP_MIN_INTRA;
+	imx_vpu_enc->live.qp_min = DEFAULT_QP_MIN;
+	imx_vpu_enc->live.qp_min_intra = DEFAULT_QP_MIN_INTRA;
 	imx_vpu_enc->static_scene_ibit_percent = DEFAULT_STATIC_SCENE_IBIT_PERCENT;
 	imx_vpu_enc->gdr_refresh_period = DEFAULT_GDR_REFRESH_PERIOD;
 	imx_vpu_enc->rotation = DEFAULT_ROTATION;
 	imx_vpu_enc->rate_control = DEFAULT_RATE_CONTROL;
-	imx_vpu_enc->qp_max = DEFAULT_QP_MAX;
-	imx_vpu_enc->qp_max_intra = DEFAULT_QP_MAX_INTRA;
-	imx_vpu_enc->intra_refresh_period = DEFAULT_INTRA_REFRESH_PERIOD;
-	imx_vpu_enc->intra_refresh_duration = DEFAULT_INTRA_REFRESH_DURATION;
-	imx_vpu_enc->intra_refresh_height = DEFAULT_INTRA_REFRESH_HEIGHT;
-	imx_vpu_enc->slice_height = DEFAULT_SLICE_HEIGHT;
+	imx_vpu_enc->live.qp_max = DEFAULT_QP_MAX;
+	imx_vpu_enc->live.qp_max_intra = DEFAULT_QP_MAX_INTRA;
+	imx_vpu_enc->live.intra_refresh_period = DEFAULT_INTRA_REFRESH_PERIOD;
+	imx_vpu_enc->live.intra_refresh_duration = DEFAULT_INTRA_REFRESH_DURATION;
+	imx_vpu_enc->live.intra_refresh_height = DEFAULT_INTRA_REFRESH_HEIGHT;
+	imx_vpu_enc->live.slice_height = DEFAULT_SLICE_HEIGHT;
 	imx_vpu_enc->slice_count = DEFAULT_SLICE_COUNT;
 	imx_vpu_enc->use_rolling_slices = DEFAULT_USE_ROLLING_SLICES;
 	imx_vpu_enc->use_rolling_tiles = DEFAULT_USE_ROLLING_TILES;
 	imx_vpu_enc->roll_size = DEFAULT_ROLL_SIZE;
 
+	imx_vpu_enc->live_applied = imx_vpu_enc->live;
+	imx_vpu_enc->live_dirty = 0;
+	imx_vpu_enc->open_rate_control = DEFAULT_RATE_CONTROL;
+
 	imx_vpu_enc->stream_buffer = NULL;
 	imx_vpu_enc->encoder = NULL;
+	imx_vpu_enc->running = FALSE;
 	imx_vpu_enc->enc_global_info = imx_vpu_api_enc_get_global_info();
 	memset(&(imx_vpu_enc->open_params), 0, sizeof(imx_vpu_enc->open_params));
 	imx_vpu_enc->default_dma_buf_allocator = NULL;
@@ -294,10 +353,379 @@ static void gst_imx_vpu_enc_warn_deprecated(GstImxVpuEnc *imx_vpu_enc, guint bit
 }
 
 
+static GstImxVpuEncLiveProperty const * gst_imx_vpu_enc_find_live_property(guint prop_id)
+{
+	gsize i;
+
+	for (i = 0; i < NUM_LIVE_PROPERTIES; ++i)
+	{
+		if (live_properties[i].prop_id == prop_id)
+			return &(live_properties[i]);
+	}
+
+	return NULL;
+}
+
+
+/* Stores new values for live properties, all in one locked section, and marks
+ * the groups that changed for handle_frame() to hand to the library before the
+ * next picture. Without an open encoder this is just storing them; the next
+ * open reads them like any other property. The values are in range already:
+ * GObject checks a property's, and reconfigure() checks its own.
+ *
+ * Returns FALSE, having stored nothing, for a bitrate of 0 while the element
+ * runs, and for a change to anything but the bitrate while an encoder opened
+ * with rate-control=0 runs: neither could take effect, and a property that
+ * reads a value the encoder is not using is worse than a refusal. */
+static gboolean gst_imx_vpu_enc_set_live_properties(GstImxVpuEnc *imx_vpu_enc,
+                                                    GstImxVpuEncLiveProperty const * const *props,
+                                                    guint const *values, guint num_props)
+{
+	guint32 changed = 0;
+	guint i;
+
+	GST_OBJECT_LOCK(imx_vpu_enc);
+
+	for (i = 0; i < num_props; ++i)
+	{
+		/* 0 selects constant quantization, which is decided when the
+		 * encoder opens and cannot be switched to while it runs. Refuse
+		 * it for as long as the element runs - also while a caps change
+		 * reopens the encoder, which would otherwise open it in constant
+		 * quantization - and keep the bitrate the encoder is actually
+		 * using, so the property still tells the truth. An element
+		 * started at 0 is already there. */
+		if ((props[i]->group == IMX_VPU_API_ENC_RECONFIG_BITRATE) && (values[i] == 0)
+		 && imx_vpu_enc->running && (imx_vpu_enc->live.bitrate != 0))
+		{
+			GST_ERROR_OBJECT(imx_vpu_enc, "bitrate 0 (constant quantization) cannot be set while the element runs; keeping %u kbps", imx_vpu_enc->live.bitrate);
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			return FALSE;
+		}
+
+		/* The encoder's own rate control (mode 0) can take a new
+		 * bitrate and nothing else; the rest is the library's rate
+		 * control, refresh sweep and slice layout, which only exist in
+		 * mode 1. Setting a value it already has is not a change. */
+		if ((props[i]->group != IMX_VPU_API_ENC_RECONFIG_BITRATE)
+		 && (imx_vpu_enc->encoder != NULL) && (imx_vpu_enc->open_rate_control != 1)
+		 && (LIVE_FIELD(&(imx_vpu_enc->live), props[i]) != values[i]))
+		{
+			GST_ERROR_OBJECT(imx_vpu_enc, "%s cannot change while playing: live reconfiguration "
+			                 "requires rate-control=1, the encoder was opened with %u; keeping %u",
+			                 props[i]->name, imx_vpu_enc->open_rate_control,
+			                 LIVE_FIELD(&(imx_vpu_enc->live), props[i]));
+			GST_OBJECT_UNLOCK(imx_vpu_enc);
+			return FALSE;
+		}
+	}
+
+	for (i = 0; i < num_props; ++i)
+	{
+		if (LIVE_FIELD(&(imx_vpu_enc->live), props[i]) == values[i])
+			continue;
+
+		LIVE_FIELD(&(imx_vpu_enc->live), props[i]) = values[i];
+		changed |= props[i]->group;
+		GST_DEBUG_OBJECT(imx_vpu_enc, "%s = %u", props[i]->name, values[i]);
+	}
+
+	imx_vpu_enc->live_dirty |= changed;
+
+	GST_OBJECT_UNLOCK(imx_vpu_enc);
+
+	return TRUE;
+}
+
+
+static gboolean gst_imx_vpu_enc_reconfigure(GstImxVpuEnc *imx_vpu_enc, GstStructure const *settings)
+{
+	GObjectClass *object_class = G_OBJECT_GET_CLASS(imx_vpu_enc);
+	GstImxVpuEncLiveProperty const *props[NUM_LIVE_PROPERTIES];
+	guint values[NUM_LIVE_PROPERTIES];
+	guint before[NUM_LIVE_PROPERTIES];
+	gint i, num_fields;
+	guint num_props = 0, k;
+
+	if (settings == NULL)
+	{
+		GST_ERROR_OBJECT(imx_vpu_enc, "reconfigure: no settings given");
+		return FALSE;
+	}
+
+	num_fields = gst_structure_n_fields(settings);
+
+	/* Check everything before storing anything: a profile switch that half
+	 * happens is worse than one that does not. */
+	for (i = 0; i < num_fields; ++i)
+	{
+		gchar const *name = gst_structure_nth_field_name(settings, i);
+		GValue const *value = gst_structure_get_value(settings, name);
+		GstImxVpuEncLiveProperty const *live_prop = NULL;
+		GParamSpec *pspec;
+		GValue uint_value = G_VALUE_INIT;
+		guint uint_val;
+
+		for (k = 0; k < NUM_LIVE_PROPERTIES; ++k)
+		{
+			if (g_strcmp0(live_properties[k].name, name) == 0)
+				live_prop = &(live_properties[k]);
+		}
+
+		pspec = g_object_class_find_property(object_class, name);
+
+		if (live_prop == NULL)
+		{
+			if (pspec != NULL)
+				GST_ERROR_OBJECT(imx_vpu_enc, "reconfigure: \"%s\" cannot change while the encoder runs; live settings are " LIVE_PROPERTY_NAMES, name);
+			else
+				GST_ERROR_OBJECT(imx_vpu_enc, "reconfigure: there is no setting \"%s\"; live settings are " LIVE_PROPERTY_NAMES, name);
+			return FALSE;
+		}
+
+		/* Not every encoder has every live property: the intra refresh
+		 * ones only exist where intra refresh does. */
+		if (pspec == NULL)
+		{
+			GST_ERROR_OBJECT(imx_vpu_enc, "reconfigure: this encoder has no \"%s\" property", name);
+			return FALSE;
+		}
+
+		/* G_TYPE_INT as well, since that is what gst_structure_from_string()
+		 * and gst_structure_new() with a bare number make. */
+		g_value_init(&uint_value, G_TYPE_UINT);
+		if (G_VALUE_HOLDS_UINT(value))
+			g_value_set_uint(&uint_value, g_value_get_uint(value));
+		else if (G_VALUE_HOLDS_INT(value) && (g_value_get_int(value) >= 0))
+			g_value_set_uint(&uint_value, (guint)g_value_get_int(value));
+		else
+		{
+			gchar *str = gst_value_serialize(value);
+			GST_ERROR_OBJECT(imx_vpu_enc, "reconfigure: %s: \"%s\" (%s) is not an unsigned integer",
+			                 name, GST_STR_NULL(str), G_VALUE_TYPE_NAME(value));
+			g_free(str);
+			return FALSE;
+		}
+
+		uint_val = g_value_get_uint(&uint_value);
+
+		/* Validating clamps the value into range and says whether it had
+		 * to. Refused rather than clamped: g_object_set() would refuse it
+		 * too. */
+		if (g_param_value_validate(pspec, &uint_value))
+		{
+			GParamSpecUInt *uint_pspec = G_PARAM_SPEC_UINT(pspec);
+			GST_ERROR_OBJECT(imx_vpu_enc, "reconfigure: %s %u is out of range %u..%u",
+			                 name, uint_val, uint_pspec->minimum, uint_pspec->maximum);
+			return FALSE;
+		}
+
+		/* A GstStructure cannot hold a field twice, so each property
+		 * comes up once. */
+		props[num_props] = live_prop;
+		values[num_props] = uint_val;
+		num_props++;
+	}
+
+	if (num_props == 0)
+	{
+		GST_DEBUG_OBJECT(imx_vpu_enc, "reconfigure: nothing to change");
+		return TRUE;
+	}
+
+	GST_OBJECT_LOCK(imx_vpu_enc);
+	for (k = 0; k < num_props; ++k)
+		before[k] = LIVE_FIELD(&(imx_vpu_enc->live), props[k]);
+	GST_OBJECT_UNLOCK(imx_vpu_enc);
+
+	if (!gst_imx_vpu_enc_set_live_properties(imx_vpu_enc, props, values, num_props))
+		return FALSE;
+
+	{
+		gchar *str = gst_structure_to_string(settings);
+		GST_INFO_OBJECT(imx_vpu_enc, "reconfigure: %s", str);
+		g_free(str);
+	}
+
+	/* g_object_set() notifies by itself; this path has to. */
+	for (k = 0; k < num_props; ++k)
+	{
+		if (before[k] != values[k])
+			g_object_notify(G_OBJECT(imx_vpu_enc), props[k]->name);
+	}
+
+	return TRUE;
+}
+
+
+/* Hands the live settings changed since the last picture to the library, in
+ * one call, so that the next picture is the first one coded with all of them.
+ * Runs on the streaming thread, which is the only one that may call into the
+ * encoder.
+ *
+ * What the library refuses is rolled back: the properties go back to what the
+ * encoder is actually running with, so that reading them tells the truth, and
+ * so that the next caps change does not open the encoder with settings that
+ * were never in effect. The library logs why it refused, in the imxvpuapi
+ * category. */
+static void gst_imx_vpu_enc_apply_live_settings(GstImxVpuEnc *imx_vpu_enc)
+{
+	GstImxVpuEncLiveSettings wanted, applied;
+	guint32 dirty, changed = 0, refused = 0;
+	guint open_rate_control;
+	ImxVpuApiEncReturnCodes enc_ret;
+	gchar const *notify[NUM_LIVE_PROPERTIES];
+	guint num_notify = 0, k;
+
+	GST_OBJECT_LOCK(imx_vpu_enc);
+	dirty = imx_vpu_enc->live_dirty;
+	imx_vpu_enc->live_dirty = 0;
+	wanted = imx_vpu_enc->live;
+	applied = imx_vpu_enc->live_applied;
+	open_rate_control = imx_vpu_enc->open_rate_control;
+	GST_OBJECT_UNLOCK(imx_vpu_enc);
+
+	if (G_LIKELY(dirty == 0))
+		return;
+
+	/* A group set back to what the encoder already has is not a change.
+	 * Dropping it matters for the refresh group in particular: applying
+	 * it restarts the sweep. */
+	for (k = 0; k < NUM_LIVE_PROPERTIES; ++k)
+	{
+		GstImxVpuEncLiveProperty const *live_prop = &(live_properties[k]);
+		if (LIVE_FIELD(&wanted, live_prop) != LIVE_FIELD(&applied, live_prop))
+			changed |= live_prop->group;
+	}
+	dirty &= changed;
+
+	if (dirty == 0)
+		return;
+
+	if ((dirty == IMX_VPU_API_ENC_RECONFIG_BITRATE) || (open_rate_control != 1))
+	{
+		/* The bitrate on its own goes the way it always went, which every
+		 * backend and both rate control modes support. In mode 0 nothing
+		 * else gets here: set_live_properties() refuses the other groups
+		 * while such an encoder runs, and what was stored before it opened
+		 * is what it opened with. */
+		if (dirty & IMX_VPU_API_ENC_RECONFIG_BITRATE)
+		{
+			enc_ret = imx_vpu_api_enc_set_bitrate(imx_vpu_enc->encoder, wanted.bitrate);
+			if (enc_ret == IMX_VPU_API_ENC_RETURN_CODE_OK)
+				applied.bitrate = wanted.bitrate;
+			else
+			{
+				GST_ERROR_OBJECT(imx_vpu_enc, "could not set bitrate to %u kbps: %s; keeping %u kbps",
+				                 wanted.bitrate, imx_vpu_api_enc_return_code_string(enc_ret), applied.bitrate);
+				refused = IMX_VPU_API_ENC_RECONFIG_BITRATE;
+			}
+		}
+	}
+	else
+	{
+		ImxVpuApiEncReconfigParams params;
+
+		/* Every field of every group, from the properties: the library
+		 * applies a group whole, and only reads the groups in flags. */
+		imx_vpu_api_enc_init_reconfig_params(&params);
+		params.flags = dirty;
+		params.bitrate = wanted.bitrate;
+		params.hrd_buffer_size = wanted.hrd_buffer_size;
+		params.qp_min_inter = wanted.qp_min;
+		params.qp_max_inter = wanted.qp_max;
+		params.qp_min_intra = wanted.qp_min_intra;
+		params.qp_max_intra = wanted.qp_max_intra;
+		params.intra_refresh_period = wanted.intra_refresh_period;
+		params.intra_refresh_duration = wanted.intra_refresh_duration;
+		params.intra_refresh_height = wanted.intra_refresh_height;
+		params.slice_height = wanted.slice_height;
+
+		enc_ret = imx_vpu_api_enc_reconfigure(imx_vpu_enc->encoder, &params);
+		if (enc_ret == IMX_VPU_API_ENC_RETURN_CODE_OK)
+		{
+			GST_DEBUG_OBJECT(imx_vpu_enc, "reconfiguration staged for the next picture (groups 0x%x)", (guint)dirty);
+			for (k = 0; k < NUM_LIVE_PROPERTIES; ++k)
+			{
+				if (dirty & live_properties[k].group)
+					LIVE_FIELD(&applied, &(live_properties[k])) = LIVE_FIELD(&wanted, &(live_properties[k]));
+			}
+		}
+		else
+		{
+			/* The library refuses a call as a whole, so all of it goes. */
+			GST_ERROR_OBJECT(imx_vpu_enc, "the encoder refused the reconfiguration: %s (the reason is "
+			                 "logged in the imxvpuapi category); the settings go back to what it runs with",
+			                 imx_vpu_api_enc_return_code_string(enc_ret));
+			refused = dirty;
+		}
+	}
+
+	GST_OBJECT_LOCK(imx_vpu_enc);
+	for (k = 0; k < NUM_LIVE_PROPERTIES; ++k)
+	{
+		GstImxVpuEncLiveProperty const *live_prop = &(live_properties[k]);
+
+		if (!(refused & live_prop->group))
+			continue;
+
+		/* A property set to a different value since the snapshot above
+		 * is a newer request, which the next picture tries in its own
+		 * right. One set again to the refused value is rolled back with
+		 * it: it would only be refused again. */
+		if (LIVE_FIELD(&(imx_vpu_enc->live), live_prop) != LIVE_FIELD(&wanted, live_prop))
+			continue;
+
+		if (LIVE_FIELD(&(imx_vpu_enc->live), live_prop) != LIVE_FIELD(&applied, live_prop))
+		{
+			GST_WARNING_OBJECT(imx_vpu_enc, "%s back to %u", live_prop->name, LIVE_FIELD(&applied, live_prop));
+			LIVE_FIELD(&(imx_vpu_enc->live), live_prop) = LIVE_FIELD(&applied, live_prop);
+			notify[num_notify++] = live_prop->name;
+		}
+	}
+	/* Only the groups this call took care of: one that was refused stays at
+	 * what the encoder runs with, and the mode 0 leftovers stay what they
+	 * were, which is what the encoder was opened with. */
+	for (k = 0; k < NUM_LIVE_PROPERTIES; ++k)
+	{
+		if ((dirty & ~refused) & live_properties[k].group)
+			LIVE_FIELD(&(imx_vpu_enc->live_applied), &(live_properties[k])) = LIVE_FIELD(&applied, &(live_properties[k]));
+	}
+	GST_OBJECT_UNLOCK(imx_vpu_enc);
+
+	for (k = 0; k < num_notify; ++k)
+		g_object_notify(G_OBJECT(imx_vpu_enc), notify[k]);
+}
+
+
 static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue const *value, GParamSpec *pspec)
 {
 	GstImxVpuEnc *imx_vpu_enc = GST_IMX_VPU_ENC(object);
 	GstImxVpuEncClass *klass = GST_IMX_VPU_ENC_CLASS(G_OBJECT_GET_CLASS(object));
+	GstImxVpuEncLiveProperty const *live_prop = gst_imx_vpu_enc_find_live_property(prop_id);
+	GValue old_value = G_VALUE_INIT;
+	gboolean encoder_open;
+
+	if (live_prop != NULL)
+	{
+		guint live_value = g_value_get_uint(value);
+		gst_imx_vpu_enc_set_live_properties(imx_vpu_enc, &live_prop, &live_value, 1);
+		return;
+	}
+
+	/* Everything else is read when the encoder opens. Changing it while
+	 * one is open is legal - it takes effect at the next caps change - but
+	 * almost never what was meant, so say so. The old value is read
+	 * through get_property so that this covers the subclasses' properties
+	 * too. */
+	GST_OBJECT_LOCK(imx_vpu_enc);
+	encoder_open = (imx_vpu_enc->encoder != NULL);
+	GST_OBJECT_UNLOCK(imx_vpu_enc);
+	if (encoder_open)
+	{
+		g_value_init(&old_value, G_PARAM_SPEC_VALUE_TYPE(pspec));
+		gst_imx_vpu_enc_get_property(object, prop_id, &old_value, pspec);
+	}
 
 	switch (prop_id)
 	{
@@ -313,14 +741,6 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
-		case PROP_BITRATE:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->bitrate = g_value_get_uint(value);
-			if (imx_vpu_enc->encoder != NULL)
-				imx_vpu_api_enc_set_bitrate(imx_vpu_enc->encoder, imx_vpu_enc->bitrate);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
 		case PROP_QUANTIZATION:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			imx_vpu_enc->quantization = g_value_get_uint(value);
@@ -330,30 +750,6 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 		case PROP_INTRA_REFRESH:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			imx_vpu_enc->intra_refresh = g_value_get_boolean(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
-		case PROP_INTRA_REFRESH_PERIOD:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->intra_refresh_period = g_value_get_uint(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
-		case PROP_INTRA_REFRESH_DURATION:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->intra_refresh_duration = g_value_get_uint(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
-		case PROP_INTRA_REFRESH_HEIGHT:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->intra_refresh_height = g_value_get_uint(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
-		case PROP_SLICE_HEIGHT:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->slice_height = g_value_get_uint(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -414,27 +810,9 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
-		case PROP_HRD_BUFFER_SIZE:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->hrd_buffer_size = g_value_get_uint(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
 		case PROP_USE_HRD:
 			GST_OBJECT_LOCK(imx_vpu_enc);
 			imx_vpu_enc->use_hrd = g_value_get_boolean(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
-		case PROP_QP_MIN:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->qp_min = g_value_get_uint(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
-		case PROP_QP_MIN_INTRA:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->qp_min_intra = g_value_get_uint(value);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -466,24 +844,20 @@ static void gst_imx_vpu_enc_set_property(GObject *object, guint prop_id, GValue 
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
-		case PROP_QP_MAX:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->qp_max = g_value_get_uint(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
-		case PROP_QP_MAX_INTRA:
-			GST_OBJECT_LOCK(imx_vpu_enc);
-			imx_vpu_enc->qp_max_intra = g_value_get_uint(value);
-			GST_OBJECT_UNLOCK(imx_vpu_enc);
-			break;
-
 		default:
 			if (klass->set_encoder_property != NULL)
 				klass->set_encoder_property(object, prop_id, value, pspec);
 			else
 				G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
 			break;
+	}
+
+	if (encoder_open)
+	{
+		if (g_param_values_cmp(pspec, &old_value, value) != 0)
+			GST_WARNING_OBJECT(imx_vpu_enc, "\"%s\" cannot change while the encoder runs; "
+			                   "the new value takes effect at the next caps change", pspec->name);
+		g_value_unset(&old_value);
 	}
 }
 
@@ -509,7 +883,7 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 
 		case PROP_BITRATE:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->bitrate);
+			g_value_set_uint(value, imx_vpu_enc->live.bitrate);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -527,25 +901,25 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 
 		case PROP_INTRA_REFRESH_PERIOD:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->intra_refresh_period);
+			g_value_set_uint(value, imx_vpu_enc->live.intra_refresh_period);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
 		case PROP_INTRA_REFRESH_DURATION:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->intra_refresh_duration);
+			g_value_set_uint(value, imx_vpu_enc->live.intra_refresh_duration);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
 		case PROP_INTRA_REFRESH_HEIGHT:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->intra_refresh_height);
+			g_value_set_uint(value, imx_vpu_enc->live.intra_refresh_height);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
 		case PROP_SLICE_HEIGHT:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->slice_height);
+			g_value_set_uint(value, imx_vpu_enc->live.slice_height);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -599,7 +973,7 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 
 		case PROP_HRD_BUFFER_SIZE:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->hrd_buffer_size);
+			g_value_set_uint(value, imx_vpu_enc->live.hrd_buffer_size);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -611,13 +985,13 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 
 		case PROP_QP_MIN:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->qp_min);
+			g_value_set_uint(value, imx_vpu_enc->live.qp_min);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
 		case PROP_QP_MIN_INTRA:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->qp_min_intra);
+			g_value_set_uint(value, imx_vpu_enc->live.qp_min_intra);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -649,13 +1023,13 @@ static void gst_imx_vpu_enc_get_property(GObject *object, guint prop_id, GValue 
 
 		case PROP_QP_MAX:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->qp_max);
+			g_value_set_uint(value, imx_vpu_enc->live.qp_max);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
 		case PROP_QP_MAX_INTRA:
 			GST_OBJECT_LOCK(imx_vpu_enc);
-			g_value_set_uint(value, imx_vpu_enc->qp_max_intra);
+			g_value_set_uint(value, imx_vpu_enc->live.qp_max_intra);
 			GST_OBJECT_UNLOCK(imx_vpu_enc);
 			break;
 
@@ -680,6 +1054,10 @@ static gboolean gst_imx_vpu_enc_start(GstVideoEncoder *encoder)
 	GstImxVpuCodecDetails const * codec_details = gst_imx_vpu_get_codec_details(compression_format);
 
 	imx_vpu_enc->fatal_error_cannot_encode = FALSE;
+
+	GST_OBJECT_LOCK(imx_vpu_enc);
+	imx_vpu_enc->running = TRUE;
+	GST_OBJECT_UNLOCK(imx_vpu_enc);
 
 	imx_vpu_enc->keyframe_type = klass->use_idr_frame_type_for_keyframes ? IMX_VPU_API_FRAME_TYPE_IDR : IMX_VPU_API_FRAME_TYPE_I;
 
@@ -733,6 +1111,10 @@ static gboolean gst_imx_vpu_enc_stop(GstVideoEncoder *encoder)
 	GstImxVpuEnc *imx_vpu_enc = GST_IMX_VPU_ENC(encoder);
 	ImxVpuApiCompressionFormat compression_format = GST_IMX_VPU_GET_ELEMENT_COMPRESSION_FORMAT(encoder);
 	GstImxVpuCodecDetails const * codec_details = gst_imx_vpu_get_codec_details(compression_format);
+
+	GST_OBJECT_LOCK(imx_vpu_enc);
+	imx_vpu_enc->running = FALSE;
+	GST_OBJECT_UNLOCK(imx_vpu_enc);
 
 	g_hash_table_remove_all(imx_vpu_enc->uploaded_buffers_table);
 
@@ -852,7 +1234,7 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	open_params->frame_rate_denominator = GST_VIDEO_INFO_FPS_D(&(state->info));
 
 	GST_OBJECT_LOCK(imx_vpu_enc);
-	open_params->bitrate = imx_vpu_enc->bitrate;
+	open_params->bitrate = imx_vpu_enc->live.bitrate;
 	open_params->gop_size = imx_vpu_enc->gop_size;
 	open_params->closed_gop_interval = imx_vpu_enc->closed_gop_interval;
 	open_params->quantization = imx_vpu_enc->quantization;
@@ -866,15 +1248,15 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	                   | ((imx_vpu_enc->intra_refresh || imx_vpu_enc->use_intra_refresh) ? IMX_VPU_API_ENC_OPEN_PARAMS_FLAG_USE_INTRA_REFRESH : 0);
 	open_params->flags |= imx_vpu_enc->use_hrd ? IMX_VPU_API_ENC_H26x_OPEN_PARAMS_FLAG_USE_HRD : 0;
 	open_params->intra_qp_delta = imx_vpu_enc->intra_qp_bias;
-	open_params->hrd_buffer_size = imx_vpu_enc->hrd_buffer_size;
-	open_params->qp_min_inter = imx_vpu_enc->qp_min;
-	open_params->qp_min_intra = imx_vpu_enc->qp_min_intra;
+	open_params->hrd_buffer_size = imx_vpu_enc->live.hrd_buffer_size;
+	open_params->qp_min_inter = imx_vpu_enc->live.qp_min;
+	open_params->qp_min_intra = imx_vpu_enc->live.qp_min_intra;
 	open_params->static_scene_ibit_percent = imx_vpu_enc->static_scene_ibit_percent;
-	open_params->intra_refresh_period = imx_vpu_enc->intra_refresh_period;
-	open_params->intra_refresh_duration = imx_vpu_enc->intra_refresh_duration;
-	open_params->intra_refresh_height = imx_vpu_enc->intra_refresh_height;
+	open_params->intra_refresh_period = imx_vpu_enc->live.intra_refresh_period;
+	open_params->intra_refresh_duration = imx_vpu_enc->live.intra_refresh_duration;
+	open_params->intra_refresh_height = imx_vpu_enc->live.intra_refresh_height;
 	open_params->intra_refresh_columns = 0;
-	open_params->slice_height = imx_vpu_enc->slice_height;
+	open_params->slice_height = imx_vpu_enc->live.slice_height;
 	open_params->slice_count = imx_vpu_enc->slice_count;
 	/* The deprecated properties are passed through rather than translated
 	 * here: the library maps them, so every caller of it - the element, the
@@ -886,8 +1268,16 @@ static gboolean gst_imx_vpu_enc_set_format(GstVideoEncoder *encoder, GstVideoCod
 	open_params->num_rolling_tiles = imx_vpu_enc->use_rolling_tiles;
 	open_params->roll_size = imx_vpu_enc->roll_size;
 	open_params->rate_control_mode = imx_vpu_enc->rate_control;
-	open_params->qp_max_inter = imx_vpu_enc->qp_max;
-	open_params->qp_max_intra = imx_vpu_enc->qp_max_intra;
+	open_params->qp_max_inter = imx_vpu_enc->live.qp_max;
+	open_params->qp_max_intra = imx_vpu_enc->live.qp_max_intra;
+	/* The encoder about to open runs with the live settings as they are
+	 * now, so nothing is pending for it. In the same locked section as the
+	 * reads above, so that a change made after them is marked for the next
+	 * picture instead of being lost. Each open starts from the properties,
+	 * so live changes outlast a caps change. */
+	imx_vpu_enc->live_applied = imx_vpu_enc->live;
+	imx_vpu_enc->live_dirty = 0;
+	imx_vpu_enc->open_rate_control = imx_vpu_enc->rate_control;
 	GST_OBJECT_UNLOCK(imx_vpu_enc);
 
 	if ((rotation != 0) && (rotation != 180))
@@ -1132,6 +1522,10 @@ static GstFlowReturn gst_imx_vpu_enc_handle_frame(GstVideoEncoder *encoder, GstV
 
 		if (force_keyframe)
 			raw_frame.frame_types[0] = klass->use_idr_frame_type_for_keyframes ? IMX_VPU_API_FRAME_TYPE_IDR : IMX_VPU_API_FRAME_TYPE_I;
+
+		/* Before this frame is pushed, so it is the first one coded with
+		 * whatever was changed since the last one. */
+		gst_imx_vpu_enc_apply_live_settings(imx_vpu_enc);
 
 		{
 			guint qf[GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE];
@@ -1551,10 +1945,10 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 			g_param_spec_uint(
 				"bitrate",
 				"Bitrate",
-				with_constant_quantization ? "Bitrate to use, in kbps (0 = no rate control; constant quality mode is used)" : "Bitrate to use, in kbps",
+				with_constant_quantization ? "Bitrate to use, in kbps (0 = no rate control; constant quality mode is used). Can change while playing, with either rate-control, but not to or from 0" : "Bitrate to use, in kbps. Can change while playing, with either rate-control",
 				with_constant_quantization ? 0 : 1, G_MAXUINT,
 				DEFAULT_BITRATE,
-				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+				G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS
 			)
 		);
 	}
@@ -1601,9 +1995,9 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 				"decoupled from gop-size, which stays the rate control window. Shorter = "
 				"faster mid-stream join, but a larger share of every picture is intra, so "
 				"quality at a fixed bitrate falls: at 1400 kbps 720p30 on FPV footage a "
-				"30 frame period measures 40.75 dB and an 11 frame one 39.08 dB",
+				"30 frame period measures 40.75 dB and an 11 frame one 39.08 dB. Can change while playing, with rate-control=1",
 				0, G_MAXUINT16, DEFAULT_INTRA_REFRESH_PERIOD,
-				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+				G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS
 			)
 		);
 		g_object_class_install_property(
@@ -1619,9 +2013,9 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 				"for frame size jitter (measured +31 ms p99 queueing delay with "
 				"rate-control=1, +56 ms with the built-in one). Clamped down to the "
 				"period. Needs rate-control=1: the encoder's own GDR spreads a sweep "
-				"over the whole period and has no dial for this",
+				"over the whole period and has no dial for this. Can change while playing, with rate-control=1",
 				0, 255, DEFAULT_INTRA_REFRESH_DURATION,
-				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+				G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS
 			)
 		);
 		g_object_class_install_property(
@@ -1638,9 +2032,9 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 				"as equal a height as they divide into, so that they cover the picture "
 				"exactly. The default measures better than a single row on both test "
 				"clips and with either rate control. Needs rate-control=1: the encoder's own "
-				"GDR derives the band height from the period",
+				"GDR derives the band height from the period. Can change while playing, with rate-control=1",
 				0, 255, DEFAULT_INTRA_REFRESH_HEIGHT,
-				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+				G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS
 			)
 		);
 		g_object_class_install_property(
@@ -1655,9 +2049,10 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 				"byte or MTU based slicing on this encoder. They confine loss and give "
 				"finer RTP fragmentation, and cost 0.19 dB on FPV footage and 0.70 dB on "
 				"distant aerial footage at a fixed bitrate. Takes precedence over "
-				"slice-count",
+				"slice-count. Can change while playing, with rate-control=1; slice-count cannot, so "
+				"setting this to 0 while playing means one slice",
 				0, 255, DEFAULT_SLICE_HEIGHT,
-				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+				G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS
 			)
 		);
 		g_object_class_install_property(
@@ -1782,9 +2177,9 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 			"latency bound and is obeyed as one: at rate-control=1 only a buffer below two and a "
 			"half frame budgets, bitrate / fps * 2.5, is clamped up, and the hardware HRD keeps its "
 			"own floor of five because it freezes below about four. A small buffer can still leave "
-			"the rate short of the target on content with no still passages to refill it",
+			"the rate short of the target on content with no still passages to refill it. Can change while playing, with rate-control=1",
 			0, G_MAXUINT, DEFAULT_HRD_BUFFER_SIZE,
-			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS
+			G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS
 		)
 	);
 
@@ -1802,20 +2197,20 @@ void gst_imx_vpu_enc_common_class_init(GstImxVpuEncClass *klass, ImxVpuApiCompre
 
 	g_object_class_install_property(object_class, PROP_QP_MIN,
 		g_param_spec_uint("qp-min", "Min QP (P/B)",
-			"Minimum quantization parameter for P/B frames (quality ceiling); lower = sharper but bigger frames. 0 = let rate control decide",
-			0, 51, DEFAULT_QP_MIN, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+			"Minimum quantization parameter for P/B frames (quality ceiling); lower = sharper but bigger frames. 0 = let rate control decide. Can change while playing, with rate-control=1",
+			0, 51, DEFAULT_QP_MIN, G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(object_class, PROP_QP_MIN_INTRA,
 		g_param_spec_uint("qp-min-intra", "Min QP (I)",
-			"Minimum quantization parameter for I frames; lower = sharper keyframes but bigger. 0 = let rate control decide",
-			0, 51, DEFAULT_QP_MIN_INTRA, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+			"Minimum quantization parameter for I frames; lower = sharper keyframes but bigger. 0 = let rate control decide. Can change while playing, with rate-control=1",
+			0, 51, DEFAULT_QP_MIN_INTRA, G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(object_class, PROP_QP_MAX,
 		g_param_spec_uint("qp-max", "Max QP (P/B)",
-			"Maximum quantization parameter for P/B frames (quality floor); lower = better worst-case quality but bigger frames. 0 = let the codec decide (51, no ceiling)",
-			0, 51, DEFAULT_QP_MAX, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+			"Maximum quantization parameter for P/B frames (quality floor); lower = better worst-case quality but bigger frames. 0 = let the codec decide (51, no ceiling). Can change while playing, with rate-control=1",
+			0, 51, DEFAULT_QP_MAX, G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(object_class, PROP_QP_MAX_INTRA,
 		g_param_spec_uint("qp-max-intra", "Max QP (I)",
-			"Maximum quantization parameter for I frames; lower = better worst-case keyframe quality but bigger keyframes. 0 = let the codec decide (51, no ceiling)",
-			0, 51, DEFAULT_QP_MAX_INTRA, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+			"Maximum quantization parameter for I frames; lower = better worst-case keyframe quality but bigger keyframes. 0 = let the codec decide (51, no ceiling). Can change while playing, with rate-control=1",
+			0, 51, DEFAULT_QP_MAX_INTRA, G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(object_class, PROP_STATIC_SCENE_IBIT_PERCENT,
 		g_param_spec_uint("static-scene-ibit-percent", "Static-scene intra bit %",
 			"Extra bits (%) the encoder spends on intra content in detected static scenes; 0 = off (flat, no static-scene spike), higher = sharper static but bigger periodic refresh spike",
