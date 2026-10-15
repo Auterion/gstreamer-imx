@@ -47,6 +47,26 @@ typedef struct _GstImxVpuEncClass GstImxVpuEncClass;
 #define GST_IMX_VPU_ENC_INTRA_REGION_QUEUE_SIZE 32
 
 
+/* The settings that can change while the encoder runs, by property. Each one
+ * belongs to one of libimxvpuapi's reconfiguration groups
+ * (ImxVpuApiEncReconfigFlags), and a group is always handed to the library
+ * whole. */
+typedef struct
+{
+	guint bitrate;
+	guint hrd_buffer_size;
+	guint qp_min;
+	guint qp_max;
+	guint qp_min_intra;
+	guint qp_max_intra;
+	guint intra_refresh_period;
+	guint intra_refresh_duration;
+	guint intra_refresh_height;
+	guint slice_height;
+}
+GstImxVpuEncLiveSettings;
+
+
 struct _GstImxVpuEnc
 {
 	GstVideoEncoder parent;
@@ -109,29 +129,36 @@ struct _GstImxVpuEnc
 	/* GObject property values. */
 	guint gop_size;
 	guint closed_gop_interval;
-	guint bitrate;
 	guint quantization;
 	guint fixed_intra_quantization;
 	gboolean allow_frameskipping;
 	gint intra_qp_bias;
-	guint hrd_buffer_size;
 	gboolean use_hrd;
-	guint qp_min;
-	guint qp_min_intra;
 	guint static_scene_ibit_percent;
 	guint rotation;
 	guint rate_control;
-	guint qp_max;
-	guint qp_max_intra;
 
 	/* Intra refresh: one band of CTB rows coded intra per picture, sweeping
 	 * top to bottom, so the stream stays decodable with no periodic IDR. */
 	gboolean intra_refresh;
-	guint intra_refresh_period;
-	guint intra_refresh_duration;
-	guint intra_refresh_height;
-	guint slice_height;
 	guint slice_count;
+
+	/* The live settings, all under the object lock. live is what the
+	 * properties say. live_applied is what the running encoder was last
+	 * given and accepted, which is what a rejected change is rolled back
+	 * to. live_dirty holds the ImxVpuApiEncReconfigFlags groups set since
+	 * then, which handle_frame() hands to the library before the next
+	 * picture. open_rate_control is the rate-control the running encoder
+	 * was opened with, which is what decides whether anything but the
+	 * bitrate can be changed - the property may have moved since. */
+	GstImxVpuEncLiveSettings live;
+	GstImxVpuEncLiveSettings live_applied;
+	guint32 live_dirty;
+	guint open_rate_control;
+	/* TRUE between start() and stop(), under the object lock. Unlike
+	 * encoder, it does not drop to NULL while a caps change reopens the
+	 * encoder, so a check against it has no window. */
+	gboolean running;
 
 	/* Deprecated, kept working and mapped onto the fields above. One bit per
 	 * property in deprecation_warned, so the notice is logged once. */
@@ -168,6 +195,7 @@ struct _GstImxVpuEncClass
 	GstCaps* (*get_output_caps)(GstImxVpuEnc *imx_vpu_enc, ImxVpuApiEncStreamInfo const *stream_info);
 
 	void (*request_intra_region)(GstImxVpuEnc *imx_vpu_enc, guint first_ctb_row, guint num_ctb_rows);
+	gboolean (*reconfigure)(GstImxVpuEnc *imx_vpu_enc, GstStructure const *settings);
 
 	gboolean use_idr_frame_type_for_keyframes;
 };
